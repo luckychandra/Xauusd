@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v1.9.1
+//  VERSION: v1.9.2
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -38,6 +38,8 @@
 //             perintah /status /pause /resume /closeall via getUpdates.
 //    v1.9.1 - Europe: window breakout awal London (EuroAR_BreakoutWindowEnd).
 //             Mulai kampanye optimasi per-sesi: Europe -> Overlap -> NY.
+//    v1.9.2 - Europe ROMBAK: London murni 10-15 TERPISAH dari overlap (15-19)
+//             & US (19-24), jam server konstan. 2 mode: BREAKOUT + SWEEP.
 //  PRASYARAT: Letakkan AurumnSymbolSpec.mqh, AurumnStrategy_Asian.mqh,
 //             AurumnStrategy_European.mqh,
 //             AurumnStrategy_US.mqh,
@@ -47,7 +49,7 @@
 //             AurumnTelegram.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "1.91"
+#property version   "1.92"
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
@@ -122,20 +124,20 @@ input bool   TradeAsianSession    = true;
 input bool   TradeEuropeanSession = true;
 input bool   TradeUSSession       = true;
 input bool   TradeOverlapSession  = true;
-//--- Jam sesi dalam WAKTU SERVER WINTER (GMT+2). DST auto +1 di summer.
-//    Disesuaikan ke jam pasar gold sebenarnya:
-//    Asia 00-08 | London 10-19 | NY 15-24(=00) | Overlap London-NY 15-19.
-//    PRIORITAS sesi: OVERLAP > US > EUROPE > ASIA. Jadi efektifnya:
-//    Asia 00-08 | London-saja 10-15 | Overlap 15-19 | NY-akhir 19-24.
-//    Lull pra-London (08-10) sengaja tak ditradingkan.
+//--- Jam sesi WAKTU SERVER HFM, KONSTAN sepanjang tahun.
+//    DST Inggris (BST) & DST server HFM saling meniadakan -> jam server TETAP.
+//    (Dibuktikan: shift +1 summer = rugi; jam konstan = profit. v1.6.3)
+//    Sesi TERPISAH bersih (non-overlap), tiap jam = satu sesi:
+//    Asia 00-08 | Europe murni 10-15 | Overlap 15-19 | NY-akhir 19-24.
+//    London open=10, NY open=15 (server, konstan). Lull 08-10 tak ditradingkan.
 input int    AsianSessionStart    = 0;        // Asia mulai (Tokyo)
 input int    AsianSessionEnd      = 8;        // Asia selesai
-input int    EuropeanSessionStart = 10;       // London mulai (~08:00 GMT)
-input int    EuropeanSessionEnd   = 19;       // London selesai (~17:00 GMT)
-input int    USSessionStart       = 15;       // NY mulai (~13:00 GMT)
+input int    EuropeanSessionStart = 10;       // London open (server, konstan)
+input int    EuropeanSessionEnd   = 15;       // London murni selesai = NY open (server)
+input int    USSessionStart       = 19;       // NY-akhir mulai (setelah overlap)
 input int    USSessionEnd         = 24;       // NY selesai (~00:00 server)
-input int    OverlapSessionStart  = 15;       // Overlap London-NY mulai (~13:00 GMT)
-input int    OverlapSessionEnd    = 19;       // Overlap London-NY selesai (~17:00 GMT)
+input int    OverlapSessionStart  = 15;       // Overlap London-NY mulai (NY open, server)
+input int    OverlapSessionEnd    = 19;       // Overlap London-NY selesai (server)
 
 //=== SPREAD ===
 input double MaxSpreadPips       = 4.1;        // Spread maksimal (pips)
@@ -224,10 +226,11 @@ int OnInit()
    //--- Inisialisasi strategi sesi Eropa (SESI 4)
    if(!Euro_Init())
    { Log(1, "Gagal inisialisasi strategi sesi Eropa."); return(INIT_FAILED); }
-   Log(2, "Strategi Eropa: " + (Euro_Strategy == EURO_ASIANRANGE
-          ? "ASIAN-RANGE BREAKOUT (range jam " + IntegerToString(EuroAR_AsianStartHour) +
-            "-" + IntegerToString(EuroAR_AsianEndHour) + ")"
-          : "DONCHIAN " + IntegerToString(Euro_Channel)) + " + ADX");
+   Log(2, "Strategi Eropa (London murni 10-15): " +
+          (Euro_Mode == EURO_SWEEP ? "SWEEP (fade London Sweep)"
+                                   : "BREAKOUT (tembus range Asia)") +
+          " | range Asia jam " + IntegerToString(Euro_AsianStart) + "-" +
+          IntegerToString(Euro_AsianEnd) + " | window<" + IntegerToString(Euro_EntryWindowEnd));
 
    //--- Inisialisasi strategi sesi US (SESI 5)
    if(!US_Init())
@@ -284,7 +287,7 @@ int OnInit()
       Log(1, "PERINGATAN: AutoTrading nonaktif.");
 
    //--- Ringkasan
-   Log(2, "===== AURUMN EA v1.9.1 INIT =====");
+   Log(2, "===== AURUMN EA v1.9.2 INIT =====");
    Log(2, "Simbol     : " + _Symbol + " | Cent: " + (g_spec.isCent ? "YA" : "TIDAK") +
           " | Cur: " + g_spec.accCurrency);
    Log(2, "Pip        : " + DoubleToString(g_spec.pip, g_spec.digits) +
