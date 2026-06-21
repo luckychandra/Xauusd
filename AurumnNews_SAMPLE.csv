@@ -1,0 +1,12 @@
+# AurumnNews.csv - jadwal news high-impact untuk filter
+# Format: YYYY.MM.DD,HH:MM,CCY,IMPACT
+# WAKTU = waktu SERVER HFM (sama dengan jam di chart), atau set News_CSVOffsetHours
+# Baris diawali '#' diabaikan. Ganti contoh di bawah dengan data asli
+# (sumber: ForexFactory/Myfxbook, ekspor high-impact USD & EUR utk 2025-2026).
+#
+# --- CONTOH FORMAT (GANTI dengan data asli) ---
+2026.01.10,15:30,USD,HIGH
+2026.02.06,15:30,USD,HIGH
+2026.03.06,15:30,USD,HIGH
+2026.01.29,21:00,USD,HIGH
+2026.01.15,15:30,EUR,HIGH
