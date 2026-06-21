@@ -384,133 +384,718 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    double profit = HistoryDealGetDouble(deal, DEAL_PROFIT);
    string dir    = (type == DEAL_TYPE_BUY) ? "BUY" : "SELL";
 
- input int    Euro_ADXPeriod         = 14;   // Periode ADX
-input double Euro_SLMultiplier      = 2.0;  // SL = ATR x mult (lebar, biar tren bernapas)
-input double Euro_RR                = 2.0;  // Risk:Reward
-input double Euro_RiskFactor        = 1.0;  // Sizing standar
-
-//--- Handle
-int g_euADXH = INVALID_HANDLE;
-
-bool Euro_Init()
-{
-   g_euADXH = iADX(_Symbol, PERIOD_M15, Euro_ADXPeriod);
-   return(g_euADXH != INVALID_HANDLE);
-}
-void Euro_Deinit()
-{
-   if(g_euADXH != INVALID_HANDLE) IndicatorRelease(g_euADXH);
+   if(entry == DEAL_ENTRY_IN)
+      Telegram_Send("BUKA " + dir + " " + DoubleToString(vol, 2) +
+                    " lot @ " + DoubleToString(price, _Digits));
+   else if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
+      Telegram_Send((profit >= 0 ? "TUTUP (+) " : "TUTUP (-) ") + DoubleToString(vol, 2) +
+                    " lot @ " + DoubleToString(price, _Digits) +
+                    " | P/L: " + DoubleToString(profit, 2));
 }
 
-//--- Filter ADX (kedua mode)
-bool Euro_ADXOK()
+//+------------------------------------------------------------------+
+//| OnTick                                                           |
+//+------------------------------------------------------------------+
+void OnTick()
 {
-   double adx[];
-   ArraySetAsSeries(adx, true);
-   if(CopyBuffer(g_euADXH, 0, 1, 2, adx) < 2) return(false);
-   return((adx[0] >= Euro_ADXMin) && (!Euro_RequireADXRising || adx[0] > adx[1]));
-}
+   //--- State risk diperbarui tiap tick (lacak equity peak & halt)
+   UpdateRiskState();
 
-//--- Range sesi Asia hari ini (high/low). Stateless: telusuri bar mundur,
-//    kumpulkan bar berjam Asia, berhenti saat keluar dari blok Asia.
-bool Euro_GetAsianRange(double &rH, double &rL)
-{
-   rH = 0; rL = 0;
-   double hi = -DBL_MAX, lo = DBL_MAX;
-   bool found = false;
-   for(int i = 1; i <= 150; i++)
+   //--- Kelola posisi terbuka tiap tick (breakeven/partial/trailing - Sesi 6)
+   ManageOpenPositions();
+
+   if(!IsNewBar()) return;
+
+   //--- Ringkasan harian Telegram (Sesi 9) saat ganti hari
+   if(UseTelegram && Telegram_NotifyDaily)
    {
-      datetime bt = iTime(_Symbol, PERIOD_M15, i);
-      if(bt <= 0) break;
-      MqlDateTime dt; TimeToStruct(bt, dt);
-      bool inAsia = (dt.hour >= EuroAR_AsianStartHour && dt.hour < EuroAR_AsianEndHour);
-      if(inAsia)
+      MqlDateTime dts; TimeToStruct(TimeCurrent(), dts);
+      if(dts.day != g_lastSummaryDay)
       {
-         double bh = iHigh(_Symbol, PERIOD_M15, i);
-         double bl = iLow(_Symbol, PERIOD_M15, i);
-         if(bh > hi) hi = bh;
-         if(bl < lo) lo = bl;
-         found = true;
+         double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+         if(g_lastSummaryDay >= 0)
+            Telegram_Send("Ringkasan harian\nSaldo: " + DoubleToString(bal, 2) +
+                          "\nP/L kemarin: " + DoubleToString(bal - g_daySummaryStartBalance, 2) +
+                          "\nDrawdown: " + DoubleToString(CurrentDrawdownPct(), 1) + "%");
+         g_lastSummaryDay = dts.day;
+         g_daySummaryStartBalance = bal;
       }
-      else if(found) break;   // sudah lewat blok Asia hari ini
    }
-   if(!found || hi <= lo) return(false);
-   rH = hi; rL = lo;
+
+   //--- Tentukan sesi dulu (gating risk kini PER-SESI)
+   string sesi = ActiveSessionName();
+   if(sesi == "NONE") return;
+
+   //--- Pause via Telegram (Sesi 9): jeda entry baru, posisi tetap dikelola
+   if(Telegram_IsPaused())
+   {
+      Log(3, "Trading dijeda via Telegram - skip entry.");
+      return;
+   }
+
+   //--- Gerbang risk: emergency global (account) + halt khusus sesi ini
+   if(!TradingAllowed(sesi))
+   {
+      Log(3, "Entry sesi " + sesi + " dihentikan oleh proteksi risk.");
+      return;
+   }
+
+   //--- Filter spread
+   if(!SpreadOK())
+   {
+      Log(3, "Spread " + DoubleToString(CurrentSpreadPips(), 2) + " > limit. Skip.");
+      return;
+   }
+
+   //--- Proteksi lanjutan (Sesi 8): blokir entry (weekend/cutoff Jumat/Senin/libur)
+   if(Protection_BlockNewTrades(TimeCurrent()))
+   {
+      Log(3, "Proteksi aktif (weekend/libur) - skip entry.");
+      return;
+   }
+
+   //--- News filter (Sesi 7): blokir entry di window news high-impact
+   if(EnableNewsFilter && News_IsBlocked(TimeCurrent()))
+   {
+      Log(3, "News window aktif - skip entry.");
+      return;
+   }
+
+   //--- Dapatkan sinyal dari strategi sesi yang aktif
+   double atrPips = GetAtrPips();
+   int    sig     = 0;
+   double slPips  = 0.0;
+   double tpPips  = 0.0;
+   double sessRiskFactor = 1.0;
+
+   if(sesi == "ASIA")                          // SESI 3
+   {
+      sig = Asian_Signal(g_spec, atrPips, slPips, tpPips);
+      sessRiskFactor = Asian_RiskFactor;
+   }
+   else if(sesi == "EUROPE")                   // SESI 4: trend-following
+   {
+      sig = Euro_Signal(g_spec, atrPips, slPips, tpPips);
+      sessRiskFactor = Euro_RiskFactor;
+   }
+   else if(sesi == "US")                       // SESI 5: volatility breakout
+   {
+      sig = US_Signal(g_spec, atrPips, slPips, tpPips);
+      sessRiskFactor = US_RiskFactor;
+   }
+   else if(sesi == "OVERLAP")                  // SESI OVERLAP London-NY: breakout
+   {
+      sig = Overlap_Signal(g_spec, atrPips, slPips, tpPips);
+      sessRiskFactor = Overlap_RiskFactor;
+   }
+
+   //--- Fallback uji MM bila tidak ada strategi sesi & TestSignal aktif
+   if(sig == 0 && EnableTestSignal && atrPips > 0)
+   {
+      sig    = TestSignal();
+      slPips = atrPips * AtrSLMultiplier;
+      tpPips = slPips * RiskRewardRatio;
+   }
+
+   //--- Eksekusi bila ada sinyal valid, belum ada posisi, & tidak dalam cooldown
+   if(sig != 0 && slPips > 0 && CountOurPositions() == 0 && !InLossCooldown())
+   {
+      double effRisk   = EffectiveRiskPercent() * sessRiskFactor;
+      double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
+      double riskMoney = balance * effRisk / 100.0;
+      double lots      = AutoLotSizing
+                         ? AurumnLotsFromRisk(g_spec, riskMoney, slPips)
+                         : NormalizeLots(FixedLotSize);
+
+      Log(2, "ENTRY " + (sig > 0 ? "BUY" : "SELL") + " | sesi " + sesi +
+             " | effRisk " + DoubleToString(effRisk, 2) + "%" +
+             " | SL " + DoubleToString(slPips, 1) + " pips" +
+             " | lot " + DoubleToString(lots, 2));
+
+      OpenTradeRiskBased(sig, lots, slPips, tpPips);
+   }
+   else
+   {
+      Log(3, "MM watch | sesi " + sesi +
+             " | DD " + DoubleToString(CurrentDrawdownPct(), 1) + "%" +
+             " | lossStreak " + IntegerToString(CountConsecutiveLosses()));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| ============ MONEY MANAGEMENT (SESI 2) ============              |
+//+------------------------------------------------------------------+
+
+//--- Map nama sesi -> index (0=ASIA,1=EUROPE,2=US, -1=NONE)
+int SessionIndex(string sess)
+{
+   if(sess == "ASIA")    return(0);
+   if(sess == "EUROPE")  return(1);
+   if(sess == "US")      return(2);
+   if(sess == "OVERLAP") return(3);
+   return(-1);
+}
+
+//--- Perbarui state risk: equity peak, emergency DD (account-level),
+//    cap harian opsional, dan loss PER SESI (reset saat tiap sesi mulai).
+void UpdateRiskState()
+{
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   //--- Equity peak (high water mark) - basis emergency DD
+   if(eq > g_equityPeak) g_equityPeak = eq;
+
+   //--- Emergency drawdown ACCOUNT-LEVEL (selalu aktif, backstop semua sesi)
+   double dd = CurrentDrawdownPct();
+   if(!g_emergencyHalt && dd >= MaxDrawdown)
+   {
+      g_emergencyHalt = true;
+      g_emergencyHaltTime = TimeCurrent();
+      Log(1, "EMERGENCY HALT: Drawdown " + DoubleToString(dd, 2) +
+             "% >= " + DoubleToString(MaxDrawdown, 2) + "%. SEMUA entry dihentikan" +
+             (EmergencyCooldownHours > 0
+                ? " (cooldown " + DoubleToString(EmergencyCooldownHours, 0) + " jam)." : " (permanen)."));
+   }
+
+   //--- Pemulihan emergency: setelah cooldown, reset & rebaseline peak (mulai segar).
+   //    Mencegah EA "mati total" permanen. EmergencyCooldownHours=0 -> permanen.
+   if(g_emergencyHalt && EmergencyCooldownHours > 0)
+   {
+      double hrsElapsed = (double)(TimeCurrent() - g_emergencyHaltTime) / 3600.0;
+      if(hrsElapsed >= EmergencyCooldownHours)
+      {
+         g_emergencyHalt = false;
+         g_equityPeak    = eq;   // baseline baru -> DD dihitung ulang dari sini
+         Log(1, "EMERGENCY RESET: cooldown selesai. Trading lanjut, baseline equity = " +
+                DoubleToString(eq, 2));
+      }
+   }
+
+   //--- Cap loss harian OPSIONAL (0 = off). Bila aktif, membatasi seluruh sesi.
+   if(MaxDailyLoss > 0)
+   {
+      MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
+      int dayKey = dt.year * 1000 + dt.day_of_year;
+      if(dayKey != g_currentDay)
+      {
+         g_currentDay     = dayKey;
+         g_dayStartEquity = eq;
+         g_dailyHalt      = false;
+      }
+      double dailyLoss = (g_dayStartEquity > 0)
+                         ? (g_dayStartEquity - eq) / g_dayStartEquity * 100.0 : 0.0;
+      if(!g_dailyHalt && dailyLoss >= MaxDailyLoss)
+      {
+         g_dailyHalt = true;
+         Log(1, "DAILY CAP HALT: Loss harian " + DoubleToString(dailyLoss, 2) +
+                "% >= " + DoubleToString(MaxDailyLoss, 2) + "%.");
+      }
+   }
+
+   //--- Tracking PER SESI: reset baseline & halt saat sesi berganti
+   string sess = ActiveSessionName();
+   int idx = SessionIndex(sess);
+   if(idx >= 0)
+   {
+      if(sess != g_curSession)   // sesi baru mulai -> reset baseline & halt sesi ini
+      {
+         g_curSession          = sess;
+         g_sessBaseEquity[idx] = eq;
+         g_sessHalt[idx]       = false;
+         Log(2, "== Sesi mulai: " + sess + " == Equity awal sesi: " + DoubleToString(eq, 2) +
+                " | server GMT+" + IntegerToString(CurrentServerGMTOffset()));
+      }
+      double sessLoss = (g_sessBaseEquity[idx] > 0)
+                        ? (g_sessBaseEquity[idx] - eq) / g_sessBaseEquity[idx] * 100.0 : 0.0;
+      if(!g_sessHalt[idx] && MaxSessionLoss > 0 && sessLoss >= MaxSessionLoss)
+      {
+         g_sessHalt[idx] = true;
+         Log(1, "SESSION HALT [" + sess + "]: loss sesi " + DoubleToString(sessLoss, 2) +
+                "% >= " + DoubleToString(MaxSessionLoss, 2) +
+                "%. Sesi ini stop, sesi lain TETAP jalan.");
+      }
+   }
+   else
+   {
+      g_curSession = "NONE";
+   }
+}
+
+//--- Trading diizinkan untuk sesi tertentu?
+//    Emergency DD & cap harian = global; halt sesi = spesifik sesi itu.
+bool TradingAllowed(string sess)
+{
+   if(g_emergencyHalt) return(false);
+   if(MaxDailyLoss > 0 && g_dailyHalt) return(false);
+   int idx = SessionIndex(sess);
+   if(idx >= 0 && g_sessHalt[idx]) return(false);
    return(true);
 }
 
-//+------------------------------------------------------------------+
-//| MODE 1: Asian-Range Breakout (khas London)                      |
-//| Entry FRESH saat close menembus di luar range Asia + buffer.    |
-//| Buffer = filter false-break. Tren dibiarkan jalan via trailing. |
-//+------------------------------------------------------------------+
-int Euro_SignalAsianRange(const SAurumnSpec &spec, double atrPips, double &slPips, double &tpPips)
+//--- Drawdown saat ini terhadap equity peak (%)
+double CurrentDrawdownPct()
 {
-   slPips = 0.0; tpPips = 0.0;
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(g_equityPeak <= 0) return(0.0);
+   double dd = (g_equityPeak - eq) / g_equityPeak * 100.0;
+   return(dd < 0 ? 0 : dd);
+}
 
-   //--- Hanya ambil breakout di AWAL London (range Asia ditembus di jam-jam pertama).
-   //    Setelah window ini, pergerakan harian sudah matang -> tidak entry breakout baru.
+//--- Risk efektif (%) setelah mode + proteksi drawdown + consecutive loss
+double EffectiveRiskPercent()
+{
+   double r = RiskPercentage * ModeRiskMult() * DDReduceMult() * ConsecLossMult();
+   //--- Pagar pengaman: jangan pernah lewat batas wajar per trade
+   r = MathMax(0.05, MathMin(r, 25.0));
+   return(r);
+}
+
+double ModeRiskMult()
+{
+   switch(InpTradeMode)
+   {
+      case MODE_DEFENSIVE:  return(0.5);
+      case MODE_AGGRESSIVE: return(2.0);
+      default:              return(1.0);
+   }
+}
+
+//--- Pengali risk berdasar drawdown (linear turun saat DD melewati ambang)
+double DDReduceMult()
+{
+   if(!EnableDrawdownReduce) return(1.0);
+   double dd = CurrentDrawdownPct();
+   if(dd <= DDReduceStartPct) return(1.0);
+   double span = MathMax(0.001, MaxDrawdown - DDReduceStartPct);
+   double t = MathMin(1.0, (dd - DDReduceStartPct) / span);
+   return(1.0 - t * (1.0 - DDReduceFloorMult));
+}
+
+//--- Pengali risk berdasar loss beruntun
+double ConsecLossMult()
+{
+   int losses = CountConsecutiveLosses();
+   if(losses < ConsecLossTrigger) return(1.0);
+   int extra = losses - ConsecLossTrigger + 1;
+   double m = MathPow(ConsecLossFactor, extra);
+   return(MathMax(0.2, m));
+}
+
+//--- Hitung loss beruntun dari history (30 hari terakhir)
+int CountConsecutiveLosses()
+{
+   if(!HistorySelect(TimeCurrent() - 30 * 86400, TimeCurrent())) return(0);
+   int total = HistoryDealsTotal();
+   int losses = 0;
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != _Symbol) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != MagicNumber) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+
+      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT)
+                    + HistoryDealGetDouble(ticket, DEAL_SWAP)
+                    + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+      if(profit < 0) losses++;
+      else break;
+   }
+   return(losses);
+}
+
+//--- Cooldown: blokir entry bila trade terakhir LOSS & belum lewat N bar.
+//    Mengatasi pola "re-entry lawan arah" yang terlihat di backtest.
+bool InLossCooldown()
+{
+   if(EntryCooldownBars <= 0) return(false);
+   if(!HistorySelect(TimeCurrent() - 30 * 86400, TimeCurrent())) return(false);
+   int total = HistoryDealsTotal();
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != _Symbol) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != MagicNumber) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+
+      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT)
+                    + HistoryDealGetDouble(ticket, DEAL_SWAP)
+                    + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+      if(profit >= 0) return(false);   // trade terakhir menang -> tak ada cooldown
+
+      datetime closeT = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+      long elapsed = (long)(TimeCurrent() - closeT);
+      long window  = (long)EntryCooldownBars * PeriodSeconds(PERIOD_M15);
+      return(elapsed < window);
+   }
+   return(false);
+}
+
+//+------------------------------------------------------------------+
+//| ============ INDIKATOR & SINYAL UJI ============                 |
+//+------------------------------------------------------------------+
+
+//--- ATR dalam satuan pips (bar terakhir yang sudah close)
+double GetAtrPips()
+{
+   double buf[];
+   ArraySetAsSeries(buf, true);
+   if(CopyBuffer(g_atrHandle, 0, 1, 1, buf) < 1) return(0.0);
+   if(g_spec.pip <= 0) return(0.0);
+   return(buf[0] / g_spec.pip);
+}
+
+//--- PLACEHOLDER: sinyal EMA cross HANYA untuk menguji MM (+1 buy, -1 sell, 0)
+int TestSignal()
+{
+   double f[], s[];
+   ArraySetAsSeries(f, true);
+   ArraySetAsSeries(s, true);
+   if(CopyBuffer(g_emaFastH, 0, 1, 2, f) < 2) return(0);
+   if(CopyBuffer(g_emaSlowH, 0, 1, 2, s) < 2) return(0);
+   bool crossUp = (f[1] <= s[1] && f[0] >  s[0]);
+   bool crossDn = (f[1] >= s[1] && f[0] <  s[0]);
+   if(crossUp) return(1);
+   if(crossDn) return(-1);
+   return(0);
+}
+
+//+------------------------------------------------------------------+
+//| ============ TRADE ENGINE ============                           |
+//+------------------------------------------------------------------+
+
+//--- Buka trade berbasis risk: konversi SL/TP pips -> harga, jaga minStop
+void OpenTradeRiskBased(int dir, double lots, double slPips, double tpPips)
+{
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double minDist = g_spec.minStopPoints * g_spec.point;
+
+   double slDist = MathMax(slPips * g_spec.pip, minDist);
+   double tpDist = MathMax(tpPips * g_spec.pip, minDist);
+
+   if(dir > 0)
+   {
+      double sl = NormalizeDouble(ask - slDist, g_spec.digits);
+      double tp = NormalizeDouble(ask + tpDist, g_spec.digits);
+      OpenBuy(lots, sl, tp, TradeComment);
+   }
+   else
+   {
+      double sl = NormalizeDouble(bid + slDist, g_spec.digits);
+      double tp = NormalizeDouble(bid - tpDist, g_spec.digits);
+      OpenSell(lots, sl, tp, TradeComment);
+   }
+}
+
+bool OpenBuy(double lots, double sl, double tp, string comment)
+{ return(ExecuteOrder(ORDER_TYPE_BUY, lots, sl, tp, comment)); }
+
+bool OpenSell(double lots, double sl, double tp, string comment)
+{ return(ExecuteOrder(ORDER_TYPE_SELL, lots, sl, tp, comment)); }
+
+bool ExecuteOrder(ENUM_ORDER_TYPE type, double lots, double sl, double tp, string comment)
+{
+   lots = NormalizeLots(lots);
+   if(lots <= 0) { Log(1, "Lot tidak valid, order dibatalkan."); return(false); }
+
+   for(int attempt = 1; attempt <= 3; attempt++)
+   {
+      bool ok = (type == ORDER_TYPE_BUY)
+                ? trade.Buy(lots, _Symbol, 0.0, sl, tp, comment)
+                : trade.Sell(lots, _Symbol, 0.0, sl, tp, comment);
+      uint rc = trade.ResultRetcode();
+
+      if(ok && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED))
+      {
+         Log(2, "Order " + EnumToString(type) + " OK lot=" + DoubleToString(lots, 2) +
+                " SL=" + DoubleToString(sl, g_spec.digits) +
+                " TP=" + DoubleToString(tp, g_spec.digits));
+         return(true);
+      }
+      if(rc == TRADE_RETCODE_REQUOTE || rc == TRADE_RETCODE_PRICE_OFF ||
+         rc == TRADE_RETCODE_PRICE_CHANGED || rc == TRADE_RETCODE_TOO_MANY_REQUESTS)
+      { Sleep(300); continue; }
+
+      Log(1, "Order GAGAL rc=" + IntegerToString(rc) + " (" +
+             trade.ResultRetcodeDescription() + ")");
+      return(false);
+   }
+   Log(1, "Order gagal setelah 3x percobaan.");
+   return(false);
+}
+
+double NormalizeLots(double lots)
+{
+   double step = g_spec.volStep > 0 ? g_spec.volStep : 0.01;
+   lots = MathFloor(lots / step) * step;
+   lots = MathMax(g_spec.volMin, MathMin(g_spec.volMax, lots));
+   return(NormalizeDouble(lots, 2));
+}
+
+int CountOurPositions()
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+      if(posInfo.SelectByIndex(i))
+         if(posInfo.Symbol() == _Symbol && posInfo.Magic() == MagicNumber)
+            count++;
+   return(count);
+}
+
+//--- Tutup semua posisi milik EA ini (dipakai close-on-news, dll)
+void CloseOurPositions(string reason)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Symbol() != _Symbol || posInfo.Magic() != MagicNumber) continue;
+      ulong ticket = posInfo.Ticket();
+      if(trade.PositionClose(ticket))
+         Log(2, "Tutup posisi (" + reason + ") ticket=" + IntegerToString((long)ticket));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| ============ SESI 6: EXIT MANAGEMENT ============                |
+//| Dipanggil tiap tick. Breakeven + partial close + trailing,       |
+//| semua berbasis ATR. Berlaku untuk posisi dari sesi mana pun.     |
+//+------------------------------------------------------------------+
+
+//--- Apakah tiket sudah pernah partial-close?
+bool IsPartialDone(ulong ticket)
+{
+   for(int i = 0; i < ArraySize(g_partialTickets); i++)
+      if(g_partialTickets[i] == ticket) return(true);
+   return(false);
+}
+
+//--- Tandai tiket sudah partial-close
+void MarkPartialDone(ulong ticket)
+{
+   int n = ArraySize(g_partialTickets);
+   ArrayResize(g_partialTickets, n + 1);
+   g_partialTickets[n] = ticket;
+}
+
+//--- Buang tiket yang posisinya sudah tertutup (jaga array tetap kecil)
+void PrunePartialTickets()
+{
+   ulong keep[];
+   int k = 0;
+   for(int i = 0; i < ArraySize(g_partialTickets); i++)
+   {
+      if(PositionSelectByTicket(g_partialTickets[i]))
+      { ArrayResize(keep, k + 1); keep[k] = g_partialTickets[i]; k++; }
+   }
+   ArrayResize(g_partialTickets, k);
+   for(int i = 0; i < k; i++) g_partialTickets[i] = keep[i];
+}
+
+//--- SL "lebih baik" untuk arah posisi (buy: lebih tinggi; sell: lebih rendah).
+//    SL = 0 dianggap belum ada (kandidat selalu menang).
+double BetterSL(double curr, double cand, long type)
+{
+   if(type == POSITION_TYPE_BUY)
+      return((curr == 0) ? cand : MathMax(curr, cand));
+   else
+      return((curr == 0) ? cand : MathMin(curr, cand));
+}
+
+void ManageOpenPositions()
+{
+   //--- Weekend close (Sesi 8): tutup semua posisi sebelum weekend (hindari gap Senin)
+   if(Protection_ShouldCloseForWeekend(TimeCurrent()) && CountOurPositions() > 0)
+   {
+      CloseOurPositions("weekend");
+      return;
+   }
+
+   //--- Pre-news close (Sesi 7): tutup posisi saat masuk window news high-impact
+   if(EnableNewsFilter && News_ClosePositions && CountOurPositions() > 0 &&
+      News_IsBlocked(TimeCurrent()))
+   {
+      CloseOurPositions("pre-news");
+      return;
+   }
+
+   if(!UseBreakeven && !UsePartialClose && !UseTrailingStop) return;
+   if(CountOurPositions() == 0) return;
+
+   double atrPips = GetAtrPips();
+   if(atrPips <= 0) return;
+   double atrPrice = atrPips * g_spec.pip;
+   double minDist  = g_spec.minStopPoints * g_spec.point;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Symbol() != _Symbol || posInfo.Magic() != MagicNumber) continue;
+
+      ulong  ticket = posInfo.Ticket();
+      long   type   = posInfo.PositionType();
+      double entry  = posInfo.PriceOpen();
+      double vol    = posInfo.Volume();
+      double sl     = posInfo.StopLoss();
+      double tp     = posInfo.TakeProfit();
+
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+      //--- Seberapa jauh harga bergerak menguntungkan (price terms)
+      double favor    = (type == POSITION_TYPE_BUY) ? (bid - entry) : (entry - ask);
+      double curClose = (type == POSITION_TYPE_BUY) ? bid : ask;
+      if(favor <= 0) continue;   // belum profit -> tak ada manajemen profit-based
+
+      //--- Partial close (sekali per tiket; sisa harus >= volume min)
+      if(UsePartialClose && Partial_Percent > 0 && !IsPartialDone(ticket) &&
+         favor >= Partial_TriggerATR * atrPrice)
+      {
+         double closeVol = NormalizeLots(vol * Partial_Percent / 100.0);
+         double remain   = vol - closeVol;
+         if(closeVol >= g_spec.volMin && remain >= g_spec.volMin)
+         {
+            if(trade.PositionClosePartial(ticket, closeVol))
+            {
+               MarkPartialDone(ticket);
+               Log(2, "Partial close " + DoubleToString(closeVol, 2) + " lot @ " +
+                      DoubleToString(curClose, g_spec.digits) + " (sisa " +
+                      DoubleToString(remain, 2) + ")");
+            }
+         }
+      }
+
+      //--- Hitung SL target gabungan (breakeven + trailing), modifikasi sekali
+      double desiredSL = sl;
+
+      if(UseBreakeven && favor >= BE_TriggerATR * atrPrice)
+      {
+         double be = (type == POSITION_TYPE_BUY) ? entry + BE_BufferPips * g_spec.pip
+                                                 : entry - BE_BufferPips * g_spec.pip;
+         desiredSL = BetterSL(desiredSL, be, type);
+      }
+
+      if(UseTrailingStop && favor >= Trail_StartATR * atrPrice)
+      {
+         double tr = (type == POSITION_TYPE_BUY) ? curClose - Trail_DistATR * atrPrice
+                                                 : curClose + Trail_DistATR * atrPrice;
+         desiredSL = BetterSL(desiredSL, tr, type);
+      }
+
+      //--- Terapkan hanya bila berubah, lebih baik, & jarak valid dari harga
+      if(desiredSL != sl)
+      {
+         bool better = (type == POSITION_TYPE_BUY) ? (desiredSL > sl || sl == 0)
+                                                   : (desiredSL < sl || sl == 0);
+         bool farEnough = (type == POSITION_TYPE_BUY) ? (bid - desiredSL >= minDist)
+                                                      : (desiredSL - ask >= minDist);
+         if(better && farEnough)
+            trade.PositionModify(ticket, NormalizeDouble(desiredSL, g_spec.digits), tp);
+      }
+   }
+
+   PrunePartialTickets();
+}
+
+//+------------------------------------------------------------------+
+//| ============ TIME / SESSION / SPREAD ============                |
+//+------------------------------------------------------------------+
+//--- Apakah server sedang DST (summer)? Pakai TimeCurrent() agar VALID di
+//    Strategy Tester maupun live (TimeGMT tidak reliabel di tester).
+bool IsServerInDST()
+{
+   datetime gmtApprox = TimeCurrent() - (datetime)ServerTimeZoneBase * 3600;
+   return(IsEUSummerTime(gmtApprox));
+}
+
+//--- Offset GMT server saat ini (base + 1 bila DST aktif)
+int CurrentServerGMTOffset()
+{
+   int off = ServerTimeZoneBase;
+   if(AutoDetectDST && IsServerInDST()) off += 1;
+   return(off);
+}
+
+//--- Pergeseran jam sesi saat DST aktif.
+//    Input sesi didefinisikan di waktu server STANDARD (winter/GMT+2).
+//    Saat summer (GMT+3), jendela digeser +1 jam agar TETAP tertambat ke
+//    jam pasar (GMT) yang sama sepanjang tahun.
+int SessionDstShift()
+{
+   //--- DEPRECATED: jam sesi TIDAK lagi digeser (server HFM sudah handle DST).
+   //    Dipertahankan hanya agar kompatibel; selalu kembalikan 0.
+   return(0);
+}
+
+bool IsEUSummerTime(datetime gmt)
+{
+   MqlDateTime dt; TimeToStruct(gmt, dt);
+   datetime start = LastSundayOfMonth(dt.year, 3) + 3600;   // Minggu terakhir Mar 01:00 GMT
+   datetime end   = LastSundayOfMonth(dt.year, 10) + 3600;  // Minggu terakhir Okt 01:00 GMT
+   return(gmt >= start && gmt < end);
+}
+
+datetime LastSundayOfMonth(int year, int month)
+{
+   int nm = (month == 12) ? 1 : month + 1;
+   int ny = (month == 12) ? year + 1 : year;
+   MqlDateTime dt; dt.year = ny; dt.mon = nm; dt.day = 1;
+   dt.hour = 0; dt.min = 0; dt.sec = 0;
+   datetime firstNext = StructToTime(dt);
+   datetime lastDay = firstNext - 86400;
+   MqlDateTime ld; TimeToStruct(lastDay, ld);
+   return(lastDay - ld.day_of_week * 86400);
+}
+
+string ActiveSessionName()
+{
+   //--- TANPA shift DST: server HFM sudah bergeser GMT+2->+3 mengikuti DST,
+   //    dan jam pasar ikut bergeser, jadi jam sesi dlm waktu server TETAP
+   //    sepanjang tahun (London 10:00, NY 15:00). Pakai jam server mentah.
    MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
-   if(dt.hour >= EuroAR_BreakoutWindowEnd) return(0);
-
-   if(!Euro_ADXOK()) return(0);
-
-   double rH, rL;
-   if(!Euro_GetAsianRange(rH, rL)) return(0);
-
-   double atrPrice = atrPips * spec.pip;
-   double buffer   = EuroAR_BreakBufferATR * atrPrice;
-   double up = rH + buffer;
-   double dn = rL - buffer;
-
-   double close1 = iClose(_Symbol, PERIOD_M15, 1);
-   double close2 = iClose(_Symbol, PERIOD_M15, 2);
-
-   //--- FRESH breakout: bar sebelumnya masih di dalam, bar ini menembus
-   bool buy  = (close1 > up) && (close2 <= up);
-   bool sell = (close1 < dn) && (close2 >= dn);
-   if(!buy && !sell) return(0);
-
-   slPips = atrPips * Euro_SLMultiplier;
-   tpPips = slPips * Euro_RR;
-   return(buy ? 1 : -1);
+   int h = dt.hour;
+   //--- Prioritas: OVERLAP > US > EUROPE > ASIA. Overlap (15-19) diperiksa dulu,
+   //    jadi 15-19 -> OVERLAP, US efektif 19-24, Europe efektif 10-15.
+   if(TradeOverlapSession  && h >= OverlapSessionStart  && h < OverlapSessionEnd)  return("OVERLAP");
+   if(TradeUSSession       && h >= USSessionStart       && h < USSessionEnd)       return("US");
+   if(TradeEuropeanSession && h >= EuropeanSessionStart && h < EuropeanSessionEnd) return("EUROPE");
+   if(TradeAsianSession    && h >= AsianSessionStart    && h < AsianSessionEnd)     return("ASIA");
+   return("NONE");
 }
 
-//+------------------------------------------------------------------+
-//| MODE 2: Donchian Breakout (alternatif)                          |
-//+------------------------------------------------------------------+
-int Euro_SignalDonchian(const SAurumnSpec &spec, double atrPips, double &slPips, double &tpPips)
+bool IsNewBar()
 {
-   slPips = 0.0; tpPips = 0.0;
-   if(!Euro_ADXOK()) return(0);
-
-   int hiIdx = iHighest(_Symbol, PERIOD_M15, MODE_HIGH, Euro_Channel, 2);
-   int loIdx = iLowest(_Symbol, PERIOD_M15, MODE_LOW,  Euro_Channel, 2);
-   if(hiIdx < 0 || loIdx < 0) return(0);
-   double chHigh = iHigh(_Symbol, PERIOD_M15, hiIdx);
-   double chLow  = iLow(_Symbol, PERIOD_M15, loIdx);
-   if((chHigh - chLow) / spec.pip < Euro_MinChannelATR * atrPips) return(0);
-
-   double close1 = iClose(_Symbol, PERIOD_M15, 1);
-   bool buy  = (close1 > chHigh);
-   bool sell = (close1 < chLow);
-   if(!buy && !sell) return(0);
-
-   slPips = atrPips * Euro_SLMultiplier;
-   tpPips = slPips * Euro_RR;
-   return(buy ? 1 : -1);
+   datetime t = iTime(_Symbol, PERIOD_CURRENT, 0);
+   if(t != g_lastBarTime) { g_lastBarTime = t; return(true); }
+   return(false);
 }
 
-//+------------------------------------------------------------------+
-//| Dispatcher                                                       |
-//+------------------------------------------------------------------+
-int Euro_Signal(const SAurumnSpec &spec, double atrPips, double &slPips, double &tpPips)
+double CurrentSpreadPips()
 {
-   slPips = 0.0; tpPips = 0.0;
-   if(atrPips <= 0) return(0);
-   if(Euro_Strategy == EURO_ASIANRANGE)
-      return(Euro_SignalAsianRange(spec, atrPips, slPips, tpPips));
-   return(Euro_SignalDonchian(spec, atrPips, slPips, tpPips));
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(g_spec.pip <= 0) return(0);
+   return((ask - bid) / g_spec.pip);
 }
 
-#endif // AURUMN_STRATEGY_EUROPEAN_MQH
+double EffectiveMaxSpread() { return(CustomSpread ? CustomSpreadValue : MaxSpreadPips); }
+bool   SpreadOK()           { return(CurrentSpreadPips() <= EffectiveMaxSpread()); }
+
+//+------------------------------------------------------------------+
+//| ============ LOGGING ============                                |
+//+------------------------------------------------------------------+
+void Log(int level, string msg)
+{
+   if(LogLevel == 0 || level > LogLevel) return;
+   string tag = (level == 1) ? "[ERROR]" : (level == 2 ? "[INFO]" : "[DEBUG]");
+   string line = TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + " " + tag + " " + msg;
+   Print(line);
+   if(EnableFileLog && g_logHandle != INVALID_HANDLE)
+   { FileWrite(g_logHandle, line); FileFlush(g_logHandle); }
+}
+//+------------------------------------------------------------------+
+//| AKHIR v1.2.0                                                     |
+//| Berikutnya (Sesi 4): Strategi Sesi Eropa - trend-following       |
+//| EMA crossover, breakout confirmation, momentum entry.            |
+//+------------------------------------------------------------------+
