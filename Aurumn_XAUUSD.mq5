@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v1.9.2
+//  VERSION: v1.9.5
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -40,16 +40,22 @@
 //             Mulai kampanye optimasi per-sesi: Europe -> Overlap -> NY.
 //    v1.9.2 - Europe ROMBAK: London murni 10-15 TERPISAH dari overlap (15-19)
 //             & US (19-24), jam server konstan. 2 mode: BREAKOUT + SWEEP.
+//    v1.9.3 - DST: deteksi dinamis (last Sun Mar/Okt) utk offset. Tambah toggle
+//             UseSessionDSTShift (default OFF) utk uji shift sesi vs jam konstan.
+//    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
+//             Europe (range Asia & window) via g_euDstShift. Audit lolos.
+//    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//             breakout. Array per-sesi 4->5. Sesi kini: Asia/PraLondon/Europe/Overlap/NY.
 //  PRASYARAT: Letakkan AurumnSymbolSpec.mqh, AurumnStrategy_Asian.mqh,
 //             AurumnStrategy_European.mqh,
 //             AurumnStrategy_US.mqh,
 //             AurumnStrategy_Overlap.mqh,
-//             AurumnNewsFilter.mqh,
+//             AurumnStrategy_PreLondon.mqh, AurumnNewsFilter.mqh,
 //             AurumnProtection.mqh,
 //             AurumnTelegram.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "1.92"
+#property version   "1.95"
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
@@ -60,6 +66,7 @@
 #include <AurumnStrategy_European.mqh> // SESI 4: strategi sesi Eropa
 #include <AurumnStrategy_US.mqh>       // SESI 5: strategi sesi US
 #include <AurumnStrategy_Overlap.mqh>  // SESI OVERLAP London-NY
+#include <AurumnStrategy_PreLondon.mqh> // SESI PRA-LONDON (Frankfurt 08-10)
 #include <AurumnNewsFilter.mqh>        // SESI 7: news filter
 #include <AurumnProtection.mqh>        // SESI 8: proteksi weekend/holiday
 #include <AurumnTelegram.mqh>          // SESI 9: telegram notif + kontrol
@@ -124,14 +131,17 @@ input bool   TradeAsianSession    = true;
 input bool   TradeEuropeanSession = true;
 input bool   TradeUSSession       = true;
 input bool   TradeOverlapSession  = true;
+input bool   TradePreLondonSession = true;
 //--- Jam sesi WAKTU SERVER HFM, KONSTAN sepanjang tahun.
 //    DST Inggris (BST) & DST server HFM saling meniadakan -> jam server TETAP.
 //    (Dibuktikan: shift +1 summer = rugi; jam konstan = profit. v1.6.3)
 //    Sesi TERPISAH bersih (non-overlap), tiap jam = satu sesi:
-//    Asia 00-08 | Europe murni 10-15 | Overlap 15-19 | NY-akhir 19-24.
-//    London open=10, NY open=15 (server, konstan). Lull 08-10 tak ditradingkan.
+//    Asia 00-08 | Pra-London 08-10 | Europe murni 10-15 | Overlap 15-19 | NY-akhir 19-24.
+//    London open=10, NY open=15 (server, konstan). Gap 08-10 kini diisi sesi Pra-London.
 input int    AsianSessionStart    = 0;        // Asia mulai (Tokyo)
 input int    AsianSessionEnd      = 8;        // Asia selesai
+input int    PreLondonSessionStart = 8;       // Pra-London mulai (Frankfurt open)
+input int    PreLondonSessionEnd   = 10;      // Pra-London selesai (London open)
 input int    EuropeanSessionStart = 10;       // London open (server, konstan)
 input int    EuropeanSessionEnd   = 15;       // London murni selesai = NY open (server)
 input int    USSessionStart       = 19;       // NY-akhir mulai (setelah overlap)
@@ -145,8 +155,9 @@ input bool   CustomSpread        = false;
 input double CustomSpreadValue   = 4.1;
 
 //=== TIME / DST ===
-input int    ServerTimeZoneBase  = 2;          // Offset GMT dasar (winter)
-input bool   AutoDetectDST       = true;       // Auto +1 saat summer
+input int    ServerTimeZoneBase  = 2;          // Offset GMT dasar (winter); offset live dideteksi dinamis
+input bool   AutoDetectDST       = true;       // Deteksi DST dinamis (last Sun Mar/Okt) utk offset & log
+input bool   UseSessionDSTShift  = false;      // (UJI) geser jam sesi +1 saat summer. Default OFF (jam server konstan = benar)
 
 //=== LOGGING ===
 input bool   EnableFileLog       = true;
@@ -170,8 +181,8 @@ bool        g_emergencyHalt = false;   // dari drawdown maksimal account-level (
 datetime    g_emergencyHaltTime = 0;   // waktu emergency fire (untuk cooldown)
 bool        g_dailyHalt     = false;   // dari cap harian opsional (reset tiap hari)
 //--- State per-sesi: index 0=ASIA, 1=EUROPE, 2=US
-double      g_sessBaseEquity[4] = {0,0,0,0};  // equity saat sesi mulai
-bool        g_sessHalt[4]       = {false,false,false,false}; // halt per sesi (reset saat sesi mulai)
+double      g_sessBaseEquity[5] = {0,0,0,0,0};  // equity saat sesi mulai
+bool        g_sessHalt[5]       = {false,false,false,false,false}; // halt per sesi (reset saat sesi mulai)
 int         g_lastSummaryDay        = -1;    // hari terakhir kirim ringkasan Telegram
 double      g_daySummaryStartBalance = 0;    // saldo awal hari (utk P/L harian)
 string      g_curSession        = "NONE";   // sesi aktif terakhir (deteksi pergantian)
@@ -246,6 +257,13 @@ int OnInit()
              IntegerToString(OverlapSessionEnd));
    }
 
+   //--- Inisialisasi strategi pra-London (Frankfurt 08-10)
+   if(TradePreLondonSession)
+   {
+      if(!PreLon_Init()) { Log(0, "GAGAL init PreLondon (ADX handle)."); return(INIT_FAILED); }
+      Log(2, "Strategi Pra-London (08-10): BREAKOUT (Donchian " + IntegerToString(PreLon_Channel) + " + ADX)");
+   }
+
    //--- Inisialisasi news filter (SESI 7)
    News_Init();
    if(EnableNewsFilter)
@@ -280,14 +298,14 @@ int OnInit()
    g_emergencyHalt  = false;
    g_dailyHalt      = false;
    g_curSession     = "NONE";
-   for(int s = 0; s < 4; s++) { g_sessBaseEquity[s] = eq; g_sessHalt[s] = false; }
+   for(int s = 0; s < 5; s++) { g_sessBaseEquity[s] = eq; g_sessHalt[s] = false; }
 
    //--- Cek izin trading
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED) || !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
       Log(1, "PERINGATAN: AutoTrading nonaktif.");
 
    //--- Ringkasan
-   Log(2, "===== AURUMN EA v1.9.2 INIT =====");
+   Log(2, "===== AURUMN EA v1.9.5 INIT =====");
    Log(2, "Simbol     : " + _Symbol + " | Cent: " + (g_spec.isCent ? "YA" : "TIDAK") +
           " | Cur: " + g_spec.accCurrency);
    Log(2, "Pip        : " + DoubleToString(g_spec.pip, g_spec.digits) +
@@ -324,6 +342,7 @@ void OnDeinit(const int reason)
    Euro_Deinit();
    US_Deinit();
    Overlap_Deinit();
+   PreLon_Deinit();
    News_Deinit();
    EventKillTimer();
    if(UseTelegram && Telegram_NotifyAlerts)
@@ -467,6 +486,7 @@ void OnTick()
    double slPips  = 0.0;
    double tpPips  = 0.0;
    double sessRiskFactor = 1.0;
+   g_euDstShift = SessionDstShift();   // sinkronkan shift DST ke modul Europe
 
    if(sesi == "ASIA")                          // SESI 3
    {
@@ -487,6 +507,11 @@ void OnTick()
    {
       sig = Overlap_Signal(g_spec, atrPips, slPips, tpPips);
       sessRiskFactor = Overlap_RiskFactor;
+   }
+   else if(sesi == "PRELONDON")                // SESI PRA-LONDON (Frankfurt): breakout
+   {
+      sig = PreLon_Signal(g_spec, atrPips, slPips, tpPips);
+      sessRiskFactor = PreLon_RiskFactor;
    }
 
    //--- Fallback uji MM bila tidak ada strategi sesi & TestSignal aktif
@@ -533,6 +558,7 @@ int SessionIndex(string sess)
    if(sess == "EUROPE")  return(1);
    if(sess == "US")      return(2);
    if(sess == "OVERLAP") return(3);
+   if(sess == "PRELONDON") return(4);
    return(-1);
 }
 
@@ -1017,14 +1043,14 @@ int CurrentServerGMTOffset()
    return(off);
 }
 
-//--- Pergeseran jam sesi saat DST aktif.
-//    Input sesi didefinisikan di waktu server STANDARD (winter/GMT+2).
-//    Saat summer (GMT+3), jendela digeser +1 jam agar TETAP tertambat ke
-//    jam pasar (GMT) yang sama sepanjang tahun.
+//--- Pergeseran jam sesi saat DST (OPSIONAL, untuk uji empiris).
+//    Default OFF: jam server HFM KONSTAN sepanjang tahun karena server (EU DST)
+//    & London (UK DST) bergeser di tanggal sama -> selisih tetap +2 jam.
+//    Bukti proyek: shift ON di summer = rugi (-209); OFF (konstan) = +175.
+//    Toggle ON hanya bila ingin membandingkan sendiri lewat backtest.
 int SessionDstShift()
 {
-   //--- DEPRECATED: jam sesi TIDAK lagi digeser (server HFM sudah handle DST).
-   //    Dipertahankan hanya agar kompatibel; selalu kembalikan 0.
+   if(UseSessionDSTShift && IsServerInDST()) return(1);
    return(0);
 }
 
@@ -1050,16 +1076,16 @@ datetime LastSundayOfMonth(int year, int month)
 
 string ActiveSessionName()
 {
-   //--- TANPA shift DST: server HFM sudah bergeser GMT+2->+3 mengikuti DST,
-   //    dan jam pasar ikut bergeser, jadi jam sesi dlm waktu server TETAP
-   //    sepanjang tahun (London 10:00, NY 15:00). Pakai jam server mentah.
+   //--- Jam server HFM KONSTAN sepanjang tahun (server selalu +2 dari London;
+   //    keduanya geser di tanggal DST sama). Default tanpa shift.
+   //    Bila UseSessionDSTShift=ON, jam efektif digeser -1 di summer (window +1).
    MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
-   int h = dt.hour;
-   //--- Prioritas: OVERLAP > US > EUROPE > ASIA. Overlap (15-19) diperiksa dulu,
-   //    jadi 15-19 -> OVERLAP, US efektif 19-24, Europe efektif 10-15.
+   int h = dt.hour - SessionDstShift();
+   //--- Prioritas: OVERLAP > US > EUROPE > ASIA.
    if(TradeOverlapSession  && h >= OverlapSessionStart  && h < OverlapSessionEnd)  return("OVERLAP");
    if(TradeUSSession       && h >= USSessionStart       && h < USSessionEnd)       return("US");
    if(TradeEuropeanSession && h >= EuropeanSessionStart && h < EuropeanSessionEnd) return("EUROPE");
+   if(TradePreLondonSession && h >= PreLondonSessionStart && h < PreLondonSessionEnd) return("PRELONDON");
    if(TradeAsianSession    && h >= AsianSessionStart    && h < AsianSessionEnd)     return("ASIA");
    return("NONE");
 }

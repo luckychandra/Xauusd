@@ -49,6 +49,7 @@ input double Euro_RR                = 2.0;  // Risk:Reward
 input double Euro_RiskFactor        = 1.0;  // Faktor sizing sesi
 
 int g_euADXH = INVALID_HANDLE;
+int g_euDstShift = 0;   // di-set EA tiap tick = SessionDstShift() (0 bila toggle off)
 
 bool Euro_Init()
 {
@@ -79,7 +80,8 @@ bool Euro_GetAsianRange(double &rH, double &rL)
       datetime bt = iTime(_Symbol, PERIOD_M15, i);
       if(bt <= 0) break;
       MqlDateTime dt; TimeToStruct(bt, dt);
-      bool inAsia = (dt.hour >= Euro_AsianStart && dt.hour < Euro_AsianEnd);
+      int eh = dt.hour - g_euDstShift;
+      bool inAsia = (eh >= Euro_AsianStart && eh < Euro_AsianEnd);
       if(inAsia)
       {
          double bh = iHigh(_Symbol, PERIOD_M15, i);
@@ -99,7 +101,7 @@ bool Euro_GetAsianRange(double &rH, double &rL)
 bool Euro_InEntryWindow()
 {
    MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
-   return(dt.hour < Euro_EntryWindowEnd);
+   return((dt.hour - g_euDstShift) < Euro_EntryWindowEnd);
 }
 
 //+------------------------------------------------------------------+
