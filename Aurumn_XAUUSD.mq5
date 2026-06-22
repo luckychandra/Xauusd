@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v1.9.5
+//  VERSION: v1.9.6
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -45,6 +45,10 @@
 //    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
 //             Europe (range Asia & window) via g_euDstShift. Audit lolos.
 //    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//    v1.9.6 - Rombak total sesi OVERLAP: ganti Donchian breakout (rugi -434,
+//             DD 96%) -> SWEEP-FADE (fade liquidity sweep/stop hunt di awal
+//             overlap, fade false-breakout NY open). Mode OVL_SWEEP (utama) /
+//             OVL_BREAKOUT (A/B). Sinkron g_ovDstShift. RR dinaikkan 2.5.
 //             breakout. Array per-sesi 4->5. Sesi kini: Asia/PraLondon/Europe/Overlap/NY.
 //  PRASYARAT: Letakkan AurumnSymbolSpec.mqh, AurumnStrategy_Asian.mqh,
 //             AurumnStrategy_European.mqh,
@@ -55,7 +59,7 @@
 //             AurumnTelegram.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "1.95"
+#property version   "1.96"
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
@@ -305,7 +309,7 @@ int OnInit()
       Log(1, "PERINGATAN: AutoTrading nonaktif.");
 
    //--- Ringkasan
-   Log(2, "===== AURUMN EA v1.9.5 INIT =====");
+   Log(2, "===== AURUMN EA v1.9.6 INIT =====");
    Log(2, "Simbol     : " + _Symbol + " | Cent: " + (g_spec.isCent ? "YA" : "TIDAK") +
           " | Cur: " + g_spec.accCurrency);
    Log(2, "Pip        : " + DoubleToString(g_spec.pip, g_spec.digits) +
@@ -487,6 +491,7 @@ void OnTick()
    double tpPips  = 0.0;
    double sessRiskFactor = 1.0;
    g_euDstShift = SessionDstShift();   // sinkronkan shift DST ke modul Europe
+   g_ovDstShift = SessionDstShift();   // sinkronkan shift DST ke modul Overlap
 
    if(sesi == "ASIA")                          // SESI 3
    {
@@ -503,7 +508,7 @@ void OnTick()
       sig = US_Signal(g_spec, atrPips, slPips, tpPips);
       sessRiskFactor = US_RiskFactor;
    }
-   else if(sesi == "OVERLAP")                  // SESI OVERLAP London-NY: breakout
+   else if(sesi == "OVERLAP")                  // SESI OVERLAP London-NY: sweep-fade
    {
       sig = Overlap_Signal(g_spec, atrPips, slPips, tpPips);
       sessRiskFactor = Overlap_RiskFactor;
