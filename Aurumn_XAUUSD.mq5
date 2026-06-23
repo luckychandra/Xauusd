@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v2.1.5
+//  VERSION: v2.1.6
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -45,6 +45,9 @@
 //    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
 //             Europe (range Asia & window) via g_euDstShift. Audit lolos.
 //    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//    v2.1.6 - KONFIG LIVE London+Asia. TradeAsianSession ON. MaxDrawdown 100->50
+//             (rem darurat live). Asia DIKONFIRMASI 1.0/1.2 (report 1.5/1.5 = override tester).
+//             PERINGATAN: London+Asia di RR1.5+Asia1.0/1.2 belum pernah di-backtest bersama.
 //    v2.1.5 - RR London di-set 1.5 (dipilih user utk compounding: dari uji RR 1.5/2.0/2.5
 //             Pepperstone 6bln, RR 1.5 = DD terendah 20.8% + Sharpe tertinggi 10.30 + win 56.6%).
 //             Compounding sudah aktif via AutoLotSizing=true (lot = % balance berjalan).
@@ -111,7 +114,7 @@
 //             AurumnHealthGuard.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "2.15"
+#property version   "2.16"
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
@@ -155,7 +158,7 @@ input double RiskPercentage     = 2.5;        // Risk per trade (%) - basis
 input double FixedLotSize       = 0.01;       // Lot tetap (jika auto = false)
 input double MaxSessionLoss      = 15.0;       // Loss limit PER SESI (%) - reset tiap sesi mulai
 input double MaxDailyLoss        = 15.0;       // Cap loss harian SELURUH sesi (= referensi)
-input double MaxDrawdown        = 100.0;      // Emergency stop DD% (= referensi; 100=off. Live: pertimbangkan 25-30)
+input double MaxDrawdown        = 50.0;       // Rem darurat DD% utk LIVE (floor; perketat stlh backtest gabungan)
 input double EmergencyCooldownHours = 24.0;   // Jam cooldown emergency lalu lanjut (0=permanen)
 input int    AtrPeriod          = 14;         // Periode ATR (M15)
 input double AtrSLMultiplier    = 1.5;        // SL = ATR x mult
@@ -215,7 +218,7 @@ input int    TestEmaFast        = 20;         // EMA cepat (uji)
 input int    TestEmaSlow        = 50;         // EMA lambat (uji)
 
 //=== SESSION (jam = waktu server HFM GMT+2/+3) ===
-input bool   TradeAsianSession    = true;
+input bool   TradeAsianSession    = true;       // ON: London + Asia (permintaan user)
 input bool   TradeEuropeanSession = true;
 input bool   TradeUSSession       = false;
 input bool   TradeOverlapSession  = false;
