@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v1.9.6
+//  VERSION: v2.1.0
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -45,6 +45,31 @@
 //    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
 //             Europe (range Asia & window) via g_euDstShift. Audit lolos.
 //    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//    v2.1.0 - SESI 10: HEALTH-GUARD autonomous. Pantau PF rolling + loss beruntun
+//             dari N trade terakhir; bila edge RUSAK -> auto-jeda entry + alert Telegram,
+//             tunggu tinjauan manusia (TIDAK auto-resume, TIDAK ubah parameter = bukan
+//             curve-fitting). Net per-posisi via selisih saldo (tahan partial-close).
+//             Default TIDAK jeda di tester (validasi tampak mentah). Modul:
+//             AurumnHealthGuard.mqh. EA kini FITUR-LENGKAP; sisa = validasi OOS + live.
+//    v2.0.0 - EXIT PER-SESI: exit tak lagi global. Posisi menandai sesi pembukanya
+//             (g_posSessionIdx); ManageOpenPositions pilih profil sesuai sesi itu.
+//             ASIA/lainnya = exit DEFAULT (partial+BE+trail 1.5/1.5 = profil A, proven +826).
+//             LONDON = profil SENDIRI (Euro_*: partial/BE OFF, trail 3.0/2.0 = profil C,
+//             biarkan pemenang jalan). Asia & London tak lagi bertubrukan exit-nya.
+//             CATATAN: ini UBAH konfig +826 (dulu London pakai A); WAJIB re-test.
+//    v1.9.9 - Selaras dgn konfig EDGE tervalidasi +826 (contohgabungan.xlsx):
+//             EuropeanSessionEnd 15->16 (fungsinya identik). Semua param Asia+London
+//             lain sudah cocok. London TIDAK diubah (strategi/RR/SL/exit utuh).
+//             EA as-is kini mereproduksi konfig +826 (PF 1.21, DD 19%).
+//    v1.9.8 - PERBAIKAN REGRESI: London dikembalikan ke window TERVALIDASI 8-15
+//             (saat tambah PreLondon, London tergeser 10-15 -> hilang jam 8-9
+//             yg profit +160). PreLondon OFF (redundan saat London mulai 8 +
+//             Donchian di likuiditas tipis = drag). Asia TIDAK diubah (stabil sejak
+//             v1.3.0); "Asia jelek" = salah alamat, akarnya window London + PreLondon.
+//    v1.9.7 - Sesi US: US_RR 1.5->2.5 agar TP > trail-start (3.0 ATR) sehingga
+//             trailing (exit C) aktif & pemenang dibiarkan jalan (pelajaran London).
+//             Window benar = default 19-24 (lewati NY-open/overlap beracun 15-18);
+//             kegagalan US sebelumnya = window di-override ke 13-21/16-22 + RR 1.0.
 //    v1.9.6 - Rombak total sesi OVERLAP: ganti Donchian breakout (rugi -434,
 //             DD 96%) -> SWEEP-FADE (fade liquidity sweep/stop hunt di awal
 //             overlap, fade false-breakout NY open). Mode OVL_SWEEP (utama) /
@@ -56,10 +81,11 @@
 //             AurumnStrategy_Overlap.mqh,
 //             AurumnStrategy_PreLondon.mqh, AurumnNewsFilter.mqh,
 //             AurumnProtection.mqh,
-//             AurumnTelegram.mqh di folder MQL5/Include/
+//             AurumnTelegram.mqh,
+//             AurumnHealthGuard.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "1.96"
+#property version   "2.10"
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
@@ -74,6 +100,7 @@
 #include <AurumnNewsFilter.mqh>        // SESI 7: news filter
 #include <AurumnProtection.mqh>        // SESI 8: proteksi weekend/holiday
 #include <AurumnTelegram.mqh>          // SESI 9: telegram notif + kontrol
+#include <AurumnHealthGuard.mqh>       // SESI 10: pemantau kesehatan edge (auto-pause)
 
 CTrade        trade;
 CPositionInfo posInfo;
@@ -114,7 +141,7 @@ input int    ConsecLossTrigger  = 3;          // Kurangi risk setelah N loss ber
 input double ConsecLossFactor   = 0.5;        // Faktor pengali risk per loss ekstra
 input int    EntryCooldownBars  = 8;          // Jeda bar M15 setelah LOSS sebelum entry lagi (0=off)
 
-//=== SESI 6: EXIT MANAGEMENT (berlaku semua sesi, berbasis ATR) ===
+//=== SESI 6: EXIT DEFAULT (dipakai ASIA & sesi tanpa profil khusus, berbasis ATR) ===
 input bool   UseBreakeven       = true;       // Pindah SL ke breakeven saat profit
 input double BE_TriggerATR      = 1.0;        // Trigger BE saat profit >= x ATR
 input double BE_BufferPips      = 2.0;        // Buffer BE di atas/bawah entry (pips)
@@ -125,6 +152,13 @@ input bool   UseTrailingStop    = true;       // Trailing stop aktif
 input double Trail_StartATR     = 1.5;        // Mulai trailing saat profit >= x ATR
 input double Trail_DistATR      = 1.5;        // Jarak trailing di belakang harga (x ATR)
 
+//=== EXIT KHUSUS LONDON (TERPISAH dari Asia; London=trend, biarkan pemenang jalan = profil C) ===
+input bool   Euro_UsePartial     = false;     // London: partial close OFF (jangan cekik runner)
+input bool   Euro_UseBE          = false;     // London: breakeven OFF
+input bool   Euro_UseTrail       = true;      // London: trailing aktif
+input double Euro_Trail_StartATR = 3.0;       // London: mulai trailing (profil C)
+input double Euro_Trail_DistATR  = 2.0;       // London: jarak trailing (profil C)
+
 //=== TEST SIGNAL (PLACEHOLDER - hanya untuk menguji MM, BUKAN strategi nyata) ===
 input bool   EnableTestSignal   = false;      // Aktifkan sinyal uji (EMA cross)
 input int    TestEmaFast        = 20;         // EMA cepat (uji)
@@ -133,9 +167,9 @@ input int    TestEmaSlow        = 50;         // EMA lambat (uji)
 //=== SESSION (jam = waktu server HFM GMT+2/+3) ===
 input bool   TradeAsianSession    = true;
 input bool   TradeEuropeanSession = true;
-input bool   TradeUSSession       = true;
-input bool   TradeOverlapSession  = true;
-input bool   TradePreLondonSession = true;
+input bool   TradeUSSession       = false;
+input bool   TradeOverlapSession  = false;
+input bool   TradePreLondonSession = false;
 //--- Jam sesi WAKTU SERVER HFM, KONSTAN sepanjang tahun.
 //    DST Inggris (BST) & DST server HFM saling meniadakan -> jam server TETAP.
 //    (Dibuktikan: shift +1 summer = rugi; jam konstan = profit. v1.6.3)
@@ -146,8 +180,8 @@ input int    AsianSessionStart    = 0;        // Asia mulai (Tokyo)
 input int    AsianSessionEnd      = 8;        // Asia selesai
 input int    PreLondonSessionStart = 8;       // Pra-London mulai (Frankfurt open)
 input int    PreLondonSessionEnd   = 10;      // Pra-London selesai (London open)
-input int    EuropeanSessionStart = 10;       // London open (server, konstan)
-input int    EuropeanSessionEnd   = 15;       // London murni selesai = NY open (server)
+input int    EuropeanSessionStart = 8;        // London mulai - window TERVALIDASI 8-15 (tangkap jam Frankfurt 8-9 yg profit +160)
+input int    EuropeanSessionEnd   = 16;       // Samakan dgn konfig edge +826 (fungsinya identik; Euro_EntryWindowEnd=15 batasi entry <=14)
 input int    USSessionStart       = 19;       // NY-akhir mulai (setelah overlap)
 input int    USSessionEnd         = 24;       // NY selesai (~00:00 server)
 input int    OverlapSessionStart  = 15;       // Overlap London-NY mulai (NY open, server)
@@ -191,6 +225,9 @@ int         g_lastSummaryDay        = -1;    // hari terakhir kirim ringkasan Te
 double      g_daySummaryStartBalance = 0;    // saldo awal hari (utk P/L harian)
 string      g_curSession        = "NONE";   // sesi aktif terakhir (deteksi pergantian)
 ulong       g_partialTickets[];            // tiket yang sudah partial-close (Sesi 6)
+int         g_posSessionIdx     = -1;       // sesi yg membuka posisi aktif (utk exit per-sesi)
+double      g_posEntryBalance   = 0.0;      // saldo saat posisi dibuka (utk hitung net per-posisi)
+int         g_prevPosCount      = 0;        // jumlah posisi tick sebelumnya (deteksi tutup)
 
 //+------------------------------------------------------------------+
 //| OnInit                                                           |
@@ -293,6 +330,19 @@ int OnInit()
       if(Telegram_AllowCommands && Telegram_PollSeconds > 0)
          EventSetTimer(Telegram_PollSeconds);
    }
+
+   //--- Inisialisasi health-guard (SESI 10): pemantau kesehatan edge
+   HealthGuard_Init();
+   g_prevPosCount    = CountOurPositions();              // aman saat restart
+   g_posEntryBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(UseHealthGuard)
+      Log(2, "Health-Guard: ON | window " + IntegerToString(HG_WindowTrades) +
+             " trade | PF min " + DoubleToString(HG_MinProfitFactor, 2) +
+             " | maxLossBeruntun " + IntegerToString(HG_MaxConsecLoss) +
+             (HG_AutoPause ? " | auto-jeda" : " | alert saja") +
+             ((bool)MQLInfoInteger(MQL_TESTER) && !HG_PauseInTester ? " (tester: catat saja)" : ""));
+   else
+      Log(2, "Health-Guard: OFF");
 
    //--- Inisialisasi state risk
    double eq = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -427,6 +477,25 @@ void OnTick()
    //--- Kelola posisi terbuka tiap tick (breakeven/partial/trailing - Sesi 6)
    ManageOpenPositions();
 
+   //--- HEALTH-GUARD (Sesi 10): deteksi posisi BARU TUTUP via selisih saldo
+   //    (net per-POSISI yang benar - tidak terdistorsi partial close)
+   int hgCount = CountOurPositions();
+   if(g_prevPosCount > 0 && hgCount == 0)   // posisi baru saja tutup penuh
+   {
+      double net = AccountInfoDouble(ACCOUNT_BALANCE) - g_posEntryBalance;
+      bool wasTripped = HealthGuard_IsTripped();
+      HealthGuard_RecordTrade(net);
+      if(!wasTripped && HealthGuard_IsTripped())
+      {
+         Log(1, "HEALTH-GUARD TRIP: " + HealthGuard_Reason() +
+                " -> entry baru dijeda. Tinjau & restart EA setelah investigasi.");
+         if(UseHealthGuard && HG_AlertTelegram && UseTelegram)
+            Telegram_Send("[HEALTH-GUARD] Edge terdeteksi rusak: " + HealthGuard_Reason() +
+                          "\nTrading DIJEDA. Tinjau & restart EA.");
+      }
+   }
+   g_prevPosCount = hgCount;
+
    if(!IsNewBar()) return;
 
    //--- Ringkasan harian Telegram (Sesi 9) saat ganti hari
@@ -453,6 +522,13 @@ void OnTick()
    if(Telegram_IsPaused())
    {
       Log(3, "Trading dijeda via Telegram - skip entry.");
+      return;
+   }
+
+   //--- Health-guard (Sesi 10): jeda entry bila edge terdeteksi rusak (live)
+   if(HealthGuard_ShouldPauseEntry())
+   {
+      Log(2, "HEALTH-GUARD aktif (" + HealthGuard_Reason() + ") - entry dijeda. Tinjau & restart EA.");
       return;
    }
 
@@ -542,6 +618,8 @@ void OnTick()
              " | SL " + DoubleToString(slPips, 1) + " pips" +
              " | lot " + DoubleToString(lots, 2));
 
+      g_posSessionIdx   = SessionIndex(sesi);   // catat sesi pembuka -> exit per-sesi
+      g_posEntryBalance = AccountInfoDouble(ACCOUNT_BALANCE); // basis hitung net per-posisi
       OpenTradeRiskBased(sig, lots, slPips, tpPips);
    }
    else
@@ -951,8 +1029,23 @@ void ManageOpenPositions()
       return;
    }
 
-   if(!UseBreakeven && !UsePartialClose && !UseTrailingStop) return;
    if(CountOurPositions() == 0) return;
+
+   //--- PROFIL EXIT PER-SESI: Asia & sesi lain = default; London (idx 1) = profil sendiri
+   bool   exUsePartial = UsePartialClose;
+   bool   exUseBE      = UseBreakeven;
+   bool   exUseTrail   = UseTrailingStop;
+   double exTrailStart = Trail_StartATR;
+   double exTrailDist  = Trail_DistATR;
+   if(g_posSessionIdx == 1)   // EUROPE/London: let-winners-run (profil C)
+   {
+      exUsePartial = Euro_UsePartial;
+      exUseBE      = Euro_UseBE;
+      exUseTrail   = Euro_UseTrail;
+      exTrailStart = Euro_Trail_StartATR;
+      exTrailDist  = Euro_Trail_DistATR;
+   }
+   if(!exUseBE && !exUsePartial && !exUseTrail) return;
 
    double atrPips = GetAtrPips();
    if(atrPips <= 0) return;
@@ -980,7 +1073,7 @@ void ManageOpenPositions()
       if(favor <= 0) continue;   // belum profit -> tak ada manajemen profit-based
 
       //--- Partial close (sekali per tiket; sisa harus >= volume min)
-      if(UsePartialClose && Partial_Percent > 0 && !IsPartialDone(ticket) &&
+      if(exUsePartial && Partial_Percent > 0 && !IsPartialDone(ticket) &&
          favor >= Partial_TriggerATR * atrPrice)
       {
          double closeVol = NormalizeLots(vol * Partial_Percent / 100.0);
@@ -1000,17 +1093,17 @@ void ManageOpenPositions()
       //--- Hitung SL target gabungan (breakeven + trailing), modifikasi sekali
       double desiredSL = sl;
 
-      if(UseBreakeven && favor >= BE_TriggerATR * atrPrice)
+      if(exUseBE && favor >= BE_TriggerATR * atrPrice)
       {
          double be = (type == POSITION_TYPE_BUY) ? entry + BE_BufferPips * g_spec.pip
                                                  : entry - BE_BufferPips * g_spec.pip;
          desiredSL = BetterSL(desiredSL, be, type);
       }
 
-      if(UseTrailingStop && favor >= Trail_StartATR * atrPrice)
+      if(exUseTrail && favor >= exTrailStart * atrPrice)
       {
-         double tr = (type == POSITION_TYPE_BUY) ? curClose - Trail_DistATR * atrPrice
-                                                 : curClose + Trail_DistATR * atrPrice;
+         double tr = (type == POSITION_TYPE_BUY) ? curClose - exTrailDist * atrPrice
+                                                 : curClose + exTrailDist * atrPrice;
          desiredSL = BetterSL(desiredSL, tr, type);
       }
 
