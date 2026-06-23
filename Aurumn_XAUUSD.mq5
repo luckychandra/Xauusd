@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v2.1.3
+//  VERSION: v2.1.4
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -45,6 +45,11 @@
 //    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
 //             Europe (range Asia & window) via g_euDstShift. Audit lolos.
 //    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//    v2.1.4 - RUNNER MODE London (opsional, default OFF). Diagnosis: profit London
+//             bergantung outlier (1 trade = 61%), mayoritas winner dipotong di 2R oleh TP.
+//             Runner: Euro_RunnerMode=true -> TP tetap dimatikan (tpPips=0), winner ikut
+//             tren penuh; dilindungi breakeven + trailing dini (1.5/2.5 ATR). Baseline C
+//             tervalidasi TIDAK berubah (default OFF). Uji ON vs OFF di 2 sampel.
 //    v2.1.3 - SINKRON PENUH ke config referensi (c.xlsx London + contohgabungan Asia).
 //             5 param yg melenceng (interferensi) dikembalikan: EuropeanSessionEnd 15->16,
 //             Euro_ADXMin 20->25, Euro_RequireADXRising false->true, MaxDrawdown 20->100,
@@ -101,7 +106,7 @@
 //             AurumnHealthGuard.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "2.13"
+#property version   "2.14"
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
@@ -923,18 +928,19 @@ void OpenTradeRiskBased(int dir, double lots, double slPips, double tpPips)
    double minDist = g_spec.minStopPoints * g_spec.point;
 
    double slDist = MathMax(slPips * g_spec.pip, minDist);
-   double tpDist = MathMax(tpPips * g_spec.pip, minDist);
+   bool   noTP   = (tpPips <= 0.0);                                  // RUNNER: tpPips 0 = tanpa TP tetap
+   double tpDist = noTP ? 0.0 : MathMax(tpPips * g_spec.pip, minDist);
 
    if(dir > 0)
    {
       double sl = NormalizeDouble(ask - slDist, g_spec.digits);
-      double tp = NormalizeDouble(ask + tpDist, g_spec.digits);
+      double tp = noTP ? 0.0 : NormalizeDouble(ask + tpDist, g_spec.digits);
       OpenBuy(lots, sl, tp, TradeComment);
    }
    else
    {
       double sl = NormalizeDouble(bid + slDist, g_spec.digits);
-      double tp = NormalizeDouble(bid - tpDist, g_spec.digits);
+      double tp = noTP ? 0.0 : NormalizeDouble(bid - tpDist, g_spec.digits);
       OpenSell(lots, sl, tp, TradeComment);
    }
 }
@@ -1077,9 +1083,15 @@ void ManageOpenPositions()
    double exTrailStart, exTrailDist;
    switch(g_posSessionIdx)
    {
-      case 1: // EUROPE/London (profil C: trend)
-         exUsePartial=Euro_UsePartial; exUseBE=Euro_UseBE; exUseTrail=Euro_UseTrail;
-         exTrailStart=Euro_Trail_StartATR; exTrailDist=Euro_Trail_DistATR; break;
+      case 1: // EUROPE/London (profil C: trend; RUNNER opsional)
+         if(Euro_RunnerMode){            // RUNNER: tanpa TP -> lindungi BE + trailing dini, biarkan tren lari
+            exUsePartial=false; exUseBE=true; exUseTrail=true;
+            exTrailStart=Euro_Run_TrailStartATR; exTrailDist=Euro_Run_TrailDistATR;
+         } else {                        // default profil C tervalidasi (TP di RR, trail 3.0/2.0)
+            exUsePartial=Euro_UsePartial; exUseBE=Euro_UseBE; exUseTrail=Euro_UseTrail;
+            exTrailStart=Euro_Trail_StartATR; exTrailDist=Euro_Trail_DistATR;
+         }
+         break;
       case 2: // US
          exUsePartial=US_UsePartial; exUseBE=US_UseBE; exUseTrail=US_UseTrail;
          exTrailStart=US_TrailStart; exTrailDist=US_TrailDist; break;
@@ -1271,4 +1283,3 @@ void Log(int level, string msg)
 //| Berikutnya (Sesi 4): Strategi Sesi Eropa - trend-following       |
 //| EMA crossover, breakout confirmation, momentum entry.            |
 //+------------------------------------------------------------------+
-
