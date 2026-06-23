@@ -41,8 +41,8 @@ input group "--- Mode SWEEP (London Sweep) ---"
 input double Euro_SweepPenetrATR    = 0.10;  // Sapuan min di luar range (x ATR) utk dihitung sweep
 
 input group "--- Umum Sesi Eropa ---"
-input double Euro_ADXMin            = 20.0; // ADX minimal (mode breakout)
-input bool   Euro_RequireADXRising  = false;// ADX harus naik (mode breakout)
+input double Euro_ADXMin            = 25.0; // ADX minimal (= c.xlsx)
+input bool   Euro_RequireADXRising  = true; // ADX harus naik (= c.xlsx)
 input int    Euro_ADXPeriod         = 14;   // Periode ADX
 input double Euro_SLMultiplier      = 2.0;  // SL = ATR x mult
 input double Euro_RR                = 2.0;  // Risk:Reward
