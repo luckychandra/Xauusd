@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v2.1.4
+//  VERSION: v2.1.5
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -45,6 +45,11 @@
 //    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
 //             Europe (range Asia & window) via g_euDstShift. Audit lolos.
 //    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//    v2.1.5 - RR London di-set 1.5 (dipilih user utk compounding: dari uji RR 1.5/2.0/2.5
+//             Pepperstone 6bln, RR 1.5 = DD terendah 20.8% + Sharpe tertinggi 10.30 + win 56.6%).
+//             Compounding sudah aktif via AutoLotSizing=true (lot = % balance berjalan).
+//             CATATAN: belum divalidasi di HFM 2.5thn (referensi +603 pakai RR 2.0). Dipilih
+//             krn opsi paling konservatif (bukan peak-return), cocok utk basis compounding.
 //    v2.1.4 - RUNNER MODE London (opsional, default OFF). Diagnosis: profit London
 //             bergantung outlier (1 trade = 61%), mayoritas winner dipotong di 2R oleh TP.
 //             Runner: Euro_RunnerMode=true -> TP tetap dimatikan (tpPips=0), winner ikut
@@ -106,7 +111,7 @@
 //             AurumnHealthGuard.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "2.14"
+#property version   "2.15"
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 

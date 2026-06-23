@@ -45,7 +45,7 @@ input double Euro_ADXMin            = 25.0; // ADX minimal (= c.xlsx)
 input bool   Euro_RequireADXRising  = true; // ADX harus naik (= c.xlsx)
 input int    Euro_ADXPeriod         = 14;   // Periode ADX
 input double Euro_SLMultiplier      = 2.0;  // SL = ATR x mult
-input double Euro_RR                = 2.0;  // Risk:Reward
+input double Euro_RR                = 1.5; // Risk:Reward (DIPILIH: 1.5 - DD terendah, Sharpe tertinggi, utk compounding)
 input bool   Euro_RunnerMode        = false; // RUNNER London: tanpa TP tetap, biarkan tren jalan (uji pertumbuhan)
 input double Euro_Run_TrailStartATR = 1.5;   // RUNNER: mulai trailing lebih dini (lindungi profit tanpa TP)
 input double Euro_Run_TrailDistATR  = 2.5;   // RUNNER: jarak trailing (beri ruang tren besar lari)
