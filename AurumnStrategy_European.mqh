@@ -46,6 +46,9 @@ input bool   Euro_RequireADXRising  = true; // ADX harus naik (= c.xlsx)
 input int    Euro_ADXPeriod         = 14;   // Periode ADX
 input double Euro_SLMultiplier      = 2.0;  // SL = ATR x mult
 input double Euro_RR                = 2.0;  // Risk:Reward
+input bool   Euro_RunnerMode        = false; // RUNNER London: tanpa TP tetap, biarkan tren jalan (uji pertumbuhan)
+input double Euro_Run_TrailStartATR = 1.5;   // RUNNER: mulai trailing lebih dini (lindungi profit tanpa TP)
+input double Euro_Run_TrailDistATR  = 2.5;   // RUNNER: jarak trailing (beri ruang tren besar lari)
 input double Euro_RiskFactor        = 1.0;  // Faktor sizing sesi
 
 int g_euADXH = INVALID_HANDLE;
@@ -127,7 +130,7 @@ int Euro_SignalBreakout(const SAurumnSpec &spec, double atrPips, double &slPips,
    if(!buy && !sell) return(0);
 
    slPips = atrPips * Euro_SLMultiplier;
-   tpPips = slPips * Euro_RR;
+   tpPips = Euro_RunnerMode ? 0.0 : slPips * Euro_RR;   // RUNNER: 0 = tanpa TP
    return(buy ? 1 : -1);
 }
 
@@ -157,7 +160,7 @@ int Euro_SignalSweep(const SAurumnSpec &spec, double atrPips, double &slPips, do
    if(!sweepHigh && !sweepLow) return(0);
 
    slPips = atrPips * Euro_SLMultiplier;
-   tpPips = slPips * Euro_RR;
+   tpPips = Euro_RunnerMode ? 0.0 : slPips * Euro_RR;   // RUNNER: 0 = tanpa TP
    return(sweepHigh ? -1 : 1);
 }
 
