@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v2.2.0
+//  VERSION: v2.2.1
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -45,6 +45,8 @@
 //    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
 //             Europe (range Asia & window) via g_euDstShift. Audit lolos.
 //    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//    v2.2.1 - Fix compile: log OnInit Overlap masih sebut Overlap_Channel (identifier
+//             lama terhapus) -> diperbarui ke deskripsi MTF Momentum-Burst.
 //    v2.2.0 - ROMBAK SESI OVERLAP -> MTF Momentum-Burst. Bias M15 (EMA50+ADX) tentukan
 //             arah (long/short saja, matikan whipsaw); entry M5 (pullback EMA20 + RSI momentum);
 //             SL=ATR(M5) ketat, TP=fixed RR1.5. News dinamis ±45m tutup spike data.
@@ -130,8 +132,8 @@
 //             AurumnHealthGuard.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "2.20"
-#define      EA_VERSION   "2.2.0"   // SATU sumber versi; dipakai di log OnInit (jangan stale lagi)
+#property version   "2.21"
+#define      EA_VERSION   "2.2.1"   // SATU sumber versi; dipakai di log OnInit (jangan stale lagi)
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
@@ -363,10 +365,10 @@ int OnInit()
    //--- Inisialisasi strategi overlap London-NY
    if(TradeOverlapSession)
    {
-      if(!Overlap_Init()) { Log(0, "GAGAL init Overlap (ADX handle)."); return(INIT_FAILED); }
-      Log(2, "Strategi Overlap: BREAKOUT (Donchian " + IntegerToString(Overlap_Channel) +
-             " + ADX) | jam " + IntegerToString(OverlapSessionStart) + "-" +
-             IntegerToString(OverlapSessionEnd));
+      if(!Overlap_Init()) { Log(0, "GAGAL init Overlap (handle MTF)."); return(INIT_FAILED); }
+      Log(2, "Strategi Overlap: MTF Momentum-Burst (bias M15 EMA" + IntegerToString(Ovl_BiasEMA) +
+             "+ADX, entry M5 EMA" + IntegerToString(Ovl_EntryEMA) + "+RSI) | jam " +
+             IntegerToString(OverlapSessionStart) + "-" + IntegerToString(OverlapSessionEnd));
    }
 
    //--- Inisialisasi strategi pra-London (Frankfurt 08-10)
