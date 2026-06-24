@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v2.2.1
+//  VERSION: v2.2.2
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -45,6 +45,14 @@
 //    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
 //             Europe (range Asia & window) via g_euDstShift. Audit lolos.
 //    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//    v2.2.2 - HAPUS sesi Pra-London sepenuhnya (kode bersih; file .mqh kini yatim).
+//             Bug#2[HIGH]: g_posSessionIdx dipulihkan saat restart-dgn-posisi (infer
+//             dari sesi pembuka via POSITION_TIME) -> posisi London tak lagi salah
+//             dapat profil exit Asia. Bug#3[MED]: cap KERAS 25% kini SETELAH
+//             sessRiskFactor (cegah jebol bila RiskFactor sesi >1.0 di masa depan).
+//             Note#5[LOW]: HealthGuard pakai penghitung streak loss BERJALAN
+//             (g_hgCurStreak, independen trim window) -> trip tepat waktu, dipersist
+//             ke disk. Note#4 terbatasi otomatis oleh cap Bug#3.
 //    v2.2.1 - Fix compile: log OnInit Overlap masih sebut Overlap_Channel (identifier
 //             lama terhapus) -> diperbarui ke deskripsi MTF Momentum-Burst.
 //    v2.2.0 - ROMBAK SESI OVERLAP -> MTF Momentum-Burst. Bias M15 (EMA50+ADX) tentukan
@@ -132,8 +140,8 @@
 //             AurumnHealthGuard.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "2.21"
-#define      EA_VERSION   "2.2.1"   // SATU sumber versi; dipakai di log OnInit (jangan stale lagi)
+#property version   "2.22"
+#define      EA_VERSION   "2.2.2"   // SATU sumber versi; dipakai di log OnInit (jangan stale lagi)
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
@@ -144,7 +152,6 @@
 #include <AurumnStrategy_European.mqh> // SESI 4: strategi sesi Eropa
 #include <AurumnStrategy_US.mqh>       // SESI 5: strategi sesi US
 #include <AurumnStrategy_Overlap.mqh>  // SESI OVERLAP London-NY
-#include <AurumnStrategy_PreLondon.mqh> // SESI PRA-LONDON (Frankfurt 08-10)
 #include <AurumnNewsFilter.mqh>        // SESI 7: news filter
 #include <AurumnProtection.mqh>        // SESI 8: proteksi weekend/holiday
 #include <AurumnTelegram.mqh>          // SESI 9: telegram notif + kontrol
@@ -224,13 +231,6 @@ input bool   Overlap_UseTrail   = false;      // Overlap: trail OFF (fixed-RR bu
 input double Overlap_TrailStart = 3.0;        // Overlap: mulai trailing
 input double Overlap_TrailDist  = 2.0;        // Overlap: jarak trailing
 
-// --- PRELONDON (profil trend) ---
-input bool   PreLon_UsePartial  = false;      // PreLondon: partial OFF
-input bool   PreLon_UseBE       = false;      // PreLondon: breakeven OFF
-input bool   PreLon_UseTrail    = true;       // PreLondon: trailing ON
-input double PreLon_TrailStart  = 3.0;        // PreLondon: mulai trailing
-input double PreLon_TrailDist   = 2.0;        // PreLondon: jarak trailing
-
 //=== TEST SIGNAL (PLACEHOLDER - hanya untuk menguji MM, BUKAN strategi nyata) ===
 input bool   EnableTestSignal   = false;      // Aktifkan sinyal uji (EMA cross)
 input int    TestEmaFast        = 20;         // EMA cepat (uji)
@@ -241,7 +241,6 @@ input bool   TradeAsianSession    = true;       // ON: London + Asia (permintaan
 input bool   TradeEuropeanSession = true;
 input bool   TradeUSSession       = false;
 input bool   TradeOverlapSession  = false;
-input bool   TradePreLondonSession = false;
 //--- Jam sesi WAKTU SERVER HFM, KONSTAN sepanjang tahun.
 //    DST Inggris (BST) & DST server HFM saling meniadakan -> jam server TETAP.
 //    (Dibuktikan: shift +1 summer = rugi; jam konstan = profit. v1.6.3)
@@ -250,8 +249,6 @@ input bool   TradePreLondonSession = false;
 //    London open=10, NY open=15 (server, konstan). Gap 08-10 kini diisi sesi Pra-London.
 input int    AsianSessionStart    = 0;        // Asia mulai (Tokyo)
 input int    AsianSessionEnd      = 8;        // Asia selesai
-input int    PreLondonSessionStart = 8;       // Pra-London mulai (Frankfurt open)
-input int    PreLondonSessionEnd   = 10;      // Pra-London selesai (London open)
 input int    EuropeanSessionStart = 8;        // London OPEN = 8 (= c.xlsx + contohgabungan). TERKUNCI.
 input int    EuropeanSessionEnd   = 16;       // London END = 16 (= c.xlsx + contohgabungan). TERKUNCI.
 input int    USSessionStart       = 19;       // NY-akhir mulai (setelah overlap)
@@ -371,12 +368,6 @@ int OnInit()
              IntegerToString(OverlapSessionStart) + "-" + IntegerToString(OverlapSessionEnd));
    }
 
-   //--- Inisialisasi strategi pra-London (Frankfurt 08-10)
-   if(TradePreLondonSession)
-   {
-      if(!PreLon_Init()) { Log(0, "GAGAL init PreLondon (ADX handle)."); return(INIT_FAILED); }
-      Log(2, "Strategi Pra-London (08-10): BREAKOUT (Donchian " + IntegerToString(PreLon_Channel) + " + ADX)");
-   }
 
    //--- Inisialisasi news filter (SESI 7)
    News_Init();
@@ -408,6 +399,22 @@ int OnInit()
    HealthGuard_Init();
    g_prevPosCount    = CountOurPositions();              // aman saat restart
    g_posEntryBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   //--- Bug#2: restart dgn posisi terbuka -> pulihkan sesi pembuka (exit profil benar)
+   if(g_prevPosCount > 0)
+   {
+      datetime ot = 0;
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         if(PositionGetTicket(i) <= 0) continue;
+         if(PositionGetInteger(POSITION_MAGIC) == MagicNumber && PositionGetString(POSITION_SYMBOL) == _Symbol)
+         { ot = (datetime)PositionGetInteger(POSITION_TIME); break; }
+      }
+      if(ot > 0)
+      {
+         g_posSessionIdx = SessionIndex(ActiveSessionNameAt(ot));
+         Log(0, "Restart dgn posisi terbuka: sesi pembuka dipulihkan (idx " + IntegerToString(g_posSessionIdx) + ") -> exit profil benar.");
+      }
+   }
    if(UseHealthGuard)
       Log(2, "Health-Guard: ON | window " + IntegerToString(HG_WindowTrades) +
              " trade | PF min " + DoubleToString(HG_MinProfitFactor, 2) +
@@ -470,7 +477,6 @@ void OnDeinit(const int reason)
    Euro_Deinit();
    US_Deinit();
    Overlap_Deinit();
-   PreLon_Deinit();
    News_Deinit();
    EventKillTimer();
    if(UseTelegram && Telegram_NotifyAlerts)
@@ -678,11 +684,6 @@ void OnTick()
       sig = Overlap_Signal(g_spec, atrPips, slPips, tpPips);
       sessRiskFactor = Overlap_RiskFactor;
    }
-   else if(sesi == "PRELONDON")                // SESI PRA-LONDON (Frankfurt): breakout
-   {
-      sig = PreLon_Signal(g_spec, atrPips, slPips, tpPips);
-      sessRiskFactor = PreLon_RiskFactor;
-   }
 
    //--- Fallback uji MM bila tidak ada strategi sesi & TestSignal aktif
    if(sig == 0 && EnableTestSignal && atrPips > 0)
@@ -696,6 +697,7 @@ void OnTick()
    if(sig != 0 && slPips > 0 && CountOurPositions() == 0 && !InLossCooldown())
    {
       double effRisk   = EffectiveRiskPercent() * sessRiskFactor;
+      effRisk = MathMin(effRisk, 25.0);   // Bug#3: cap KERAS setelah sessRiskFactor (cegah jebol bila RiskFactor>1)
       double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
       double riskMoney = balance * effRisk / 100.0;
       double lots      = AutoLotSizing
@@ -730,7 +732,6 @@ int SessionIndex(string sess)
    if(sess == "EUROPE")  return(1);
    if(sess == "US")      return(2);
    if(sess == "OVERLAP") return(3);
-   if(sess == "PRELONDON") return(4);
    return(-1);
 }
 
@@ -1141,9 +1142,6 @@ void ManageOpenPositions()
       case 3: // OVERLAP
          exUsePartial=Overlap_UsePartial; exUseBE=Overlap_UseBE; exUseTrail=Overlap_UseTrail;
          exTrailStart=Overlap_TrailStart; exTrailDist=Overlap_TrailDist; break;
-      case 4: // PRELONDON
-         exUsePartial=PreLon_UsePartial; exUseBE=PreLon_UseBE; exUseTrail=PreLon_UseTrail;
-         exTrailStart=PreLon_TrailStart; exTrailDist=PreLon_TrailDist; break;
       default: // ASIA (idx 0) / fallback
          exUsePartial=Asia_UsePartial; exUseBE=Asia_UseBE; exUseTrail=Asia_UseTrail;
          exTrailStart=Asia_TrailStart; exTrailDist=Asia_TrailDist; break;
@@ -1275,21 +1273,19 @@ datetime LastSundayOfMonth(int year, int month)
    return(lastDay - ld.day_of_week * 86400);
 }
 
-string ActiveSessionName()
+string ActiveSessionNameAt(datetime when)
 {
-   //--- Jam server HFM KONSTAN sepanjang tahun (server selalu +2 dari London;
-   //    keduanya geser di tanggal DST sama). Default tanpa shift.
-   //    Bila UseSessionDSTShift=ON, jam efektif digeser -1 di summer (window +1).
-   MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
+   //--- Jam server HFM KONSTAN sepanjang tahun (server +2 dari London; geser di DST sama).
+   MqlDateTime dt; TimeToStruct(when, dt);
    int h = dt.hour - SessionDstShift();
    //--- Prioritas: OVERLAP > US > EUROPE > ASIA.
    if(TradeOverlapSession  && h >= OverlapSessionStart  && h < OverlapSessionEnd)  return("OVERLAP");
    if(TradeUSSession       && h >= USSessionStart       && h < USSessionEnd)       return("US");
    if(TradeEuropeanSession && h >= EuropeanSessionStart && h < EuropeanSessionEnd) return("EUROPE");
-   if(TradePreLondonSession && h >= PreLondonSessionStart && h < PreLondonSessionEnd) return("PRELONDON");
    if(TradeAsianSession    && h >= AsianSessionStart    && h < AsianSessionEnd)     return("ASIA");
    return("NONE");
 }
+string ActiveSessionName() { return(ActiveSessionNameAt(TimeCurrent())); }
 
 bool IsNewBar()
 {

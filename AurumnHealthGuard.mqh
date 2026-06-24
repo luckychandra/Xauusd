@@ -33,6 +33,7 @@ input bool   HG_PauseInTester       = false;   // Izinkan jeda di Strategy Teste
 double g_hgResults[];        // P/L bersih trade terakhir (rolling window)
 bool   g_hgTripped = false;  // sudah trip? (persist ke disk; restart TIDAK reset)
 string g_hgReason  = "";     // alasan trip
+int    g_hgCurStreak = 0;    // FIX#5: streak loss BERJALAN (independen window; tak understated saat trim)
 
 //--- FIX#5: Persistensi state ke disk (LIVE saja; tester selalu fresh agar backtest bersih)
 string HG_StateFileName() { return("AurumnHG_" + _Symbol + ".dat"); }
@@ -43,6 +44,7 @@ void HealthGuard_SaveState()
    int h = FileOpen(HG_StateFileName(), FILE_WRITE|FILE_BIN);
    if(h == INVALID_HANDLE) return;
    FileWriteInteger(h, g_hgTripped ? 1 : 0, INT_VALUE);
+   FileWriteInteger(h, g_hgCurStreak, INT_VALUE);   // FIX#5: persist streak berjalan
    int n = ArraySize(g_hgResults);
    FileWriteInteger(h, n, INT_VALUE);
    for(int i = 0; i < n; i++) FileWriteDouble(h, g_hgResults[i]);
@@ -56,6 +58,7 @@ void HealthGuard_LoadState()
    int h = FileOpen(HG_StateFileName(), FILE_READ|FILE_BIN);
    if(h == INVALID_HANDLE) return;
    g_hgTripped = (FileReadInteger(h, INT_VALUE) == 1);
+   g_hgCurStreak = FileReadInteger(h, INT_VALUE);   // FIX#5: pulihkan streak berjalan
    int n = FileReadInteger(h, INT_VALUE);
    ArrayResize(g_hgResults, 0);
    for(int i = 0; i < n && !FileIsEnding(h); i++)
@@ -80,6 +83,7 @@ void HealthGuard_Reset()
    bool was = g_hgTripped;
    g_hgTripped = false;
    g_hgReason  = "";
+   g_hgCurStreak = 0;
    ArrayResize(g_hgResults, 0);                          // window bersih -> evaluasi ulang dari trade baru
    if(!(bool)MQLInfoInteger(MQL_TESTER) && FileIsExist(HG_StateFileName()))
       FileDelete(HG_StateFileName());                    // hapus state persisten
@@ -103,6 +107,7 @@ void HealthGuard_Init()
    ArrayResize(g_hgResults, 0);
    g_hgTripped = false;
    g_hgReason  = "";
+   g_hgCurStreak = 0;
    HealthGuard_LoadState();   // FIX#5: pulihkan state live dari disk (tester di-skip)
 }
 
@@ -113,12 +118,11 @@ void HealthGuard_Evaluate()
    if(n < HG_MinTradesToEval) return;
 
    double gp = 0.0, gl = 0.0;
-   int    consec = 0, maxConsec = 0;
    for(int i = 0; i < n; i++)
    {
       double r = g_hgResults[i];
-      if(r >= 0.0) { gp += r; consec = 0; }
-      else         { gl += (-r); consec++; if(consec > maxConsec) maxConsec = consec; }
+      if(r >= 0.0) gp += r;
+      else         gl += (-r);
    }
    double pf = (gl > 0.0) ? (gp / gl) : (gp > 0.0 ? 999.0 : 0.0);
 
@@ -126,8 +130,8 @@ void HealthGuard_Evaluate()
    if(pf < HG_MinProfitFactor)
       reason = "PF rolling " + DoubleToString(pf, 2) + " < " + DoubleToString(HG_MinProfitFactor, 2) +
                " (" + IntegerToString(n) + " trade terakhir)";
-   else if(maxConsec >= HG_MaxConsecLoss)
-      reason = "loss beruntun " + IntegerToString(maxConsec) + " >= " + IntegerToString(HG_MaxConsecLoss);
+   else if(g_hgCurStreak >= HG_MaxConsecLoss)
+      reason = "loss beruntun " + IntegerToString(g_hgCurStreak) + " >= " + IntegerToString(HG_MaxConsecLoss);
 
    if(reason != "" && !g_hgTripped)
    {
@@ -140,6 +144,9 @@ void HealthGuard_Evaluate()
 void HealthGuard_RecordTrade(double netResult)
 {
    if(!UseHealthGuard) return;
+   //--- FIX#5: streak loss berjalan (dihitung independen dari trim window -> akurat penuh)
+   if(netResult < 0.0) g_hgCurStreak++;
+   else                g_hgCurStreak = 0;
    int n = ArraySize(g_hgResults);
    ArrayResize(g_hgResults, n + 1);
    g_hgResults[n] = netResult;
