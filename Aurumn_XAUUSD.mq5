@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v2.1.9
+//  VERSION: v2.2.0
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -45,6 +45,11 @@
 //    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
 //             Europe (range Asia & window) via g_euDstShift. Audit lolos.
 //    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//    v2.2.0 - ROMBAK SESI OVERLAP -> MTF Momentum-Burst. Bias M15 (EMA50+ADX) tentukan
+//             arah (long/short saja, matikan whipsaw); entry M5 (pullback EMA20 + RSI momentum);
+//             SL=ATR(M5) ketat, TP=fixed RR1.5. News dinamis ±45m tutup spike data.
+//             Entry dievaluasi per-bar M5 (gerbang OnTick sadar-sesi; sesi lain tetap M15).
+//             RiskFactor 0.5 (konservatif). Default OFF - WAJIB validasi isolasi dulu.
 //    v2.1.9 - News DINAMIS: News_Source enum (AUTO/CSV_ONLY/CALENDAR_ONLY). AUTO =
 //             live pakai kalender MT5 dinamis (fallback CSV), tester pakai CSV otomatis.
 //             Refresh harian di live (News_MaybeRefresh di OnTick). Backtest tetap CSV
@@ -125,8 +130,8 @@
 //             AurumnHealthGuard.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "2.19"
-#define      EA_VERSION   "2.1.9"   // SATU sumber versi; dipakai di log OnInit (jangan stale lagi)
+#property version   "2.20"
+#define      EA_VERSION   "2.2.0"   // SATU sumber versi; dipakai di log OnInit (jangan stale lagi)
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
@@ -213,7 +218,7 @@ input double US_TrailDist       = 2.0;        // US: jarak trailing
 // --- OVERLAP (profil trend) ---
 input bool   Overlap_UsePartial = false;      // Overlap: partial OFF
 input bool   Overlap_UseBE      = false;      // Overlap: breakeven OFF
-input bool   Overlap_UseTrail   = true;       // Overlap: trailing ON
+input bool   Overlap_UseTrail   = false;      // Overlap: trail OFF (fixed-RR burst; SL/TP basis ATR M5)
 input double Overlap_TrailStart = 3.0;        // Overlap: mulai trailing
 input double Overlap_TrailDist  = 2.0;        // Overlap: jarak trailing
 
@@ -272,6 +277,7 @@ input int    LogLevel            = 2;          // 0=OFF 1=ERR 2=INFO 3=DEBUG
 SAurumnSpec g_spec;                 // spek simbol aktual
 int         g_logHandle  = INVALID_HANDLE;
 datetime    g_lastBarTime = 0;
+datetime    g_lastBarTimeM5 = 0;   // jejak bar M5 (entry MTF Overlap)
 int         g_atrHandle  = INVALID_HANDLE;
 int         g_emaFastH   = INVALID_HANDLE;
 int         g_emaSlowH   = INVALID_HANDLE;
@@ -575,7 +581,13 @@ void OnTick()
    }
    g_prevPosCount = hgCount;
 
-   if(!IsNewBar()) return;
+   //--- Tentukan sesi dulu (perlu utk gerbang bar sadar-sesi: Overlap entry per-bar M5)
+   string sesi = ActiveSessionName();
+   bool   m15New = IsNewBar();      // jejak bar M15 (semua sesi)
+   bool   m5New  = IsNewBarM5();    // jejak bar M5 (entry MTF Overlap)
+   if(sesi == "NONE") return;
+   //--- Gerbang bar: M15 utk SEMUA sesi; OVERLAP juga boleh entry tiap bar M5 (momentum-burst MTF)
+   if(!m15New && !(sesi == "OVERLAP" && m5New)) return;
 
    //--- Ringkasan harian Telegram (Sesi 9) saat ganti hari
    if(UseTelegram && Telegram_NotifyDaily)
@@ -592,10 +604,6 @@ void OnTick()
          g_daySummaryStartBalance = bal;
       }
    }
-
-   //--- Tentukan sesi dulu (gating risk kini PER-SESI)
-   string sesi = ActiveSessionName();
-   if(sesi == "NONE") return;
 
    //--- Pause via Telegram (Sesi 9): jeda entry baru, posisi tetap dikelola
    if(Telegram_IsPaused())
@@ -663,7 +671,7 @@ void OnTick()
       sig = US_Signal(g_spec, atrPips, slPips, tpPips);
       sessRiskFactor = US_RiskFactor;
    }
-   else if(sesi == "OVERLAP")                  // SESI OVERLAP London-NY: sweep-fade
+   else if(sesi == "OVERLAP")                  // SESI OVERLAP: MTF Momentum-Burst (M15 bias + M5 entry)
    {
       sig = Overlap_Signal(g_spec, atrPips, slPips, tpPips);
       sessRiskFactor = Overlap_RiskFactor;
@@ -1285,6 +1293,13 @@ bool IsNewBar()
 {
    datetime t = iTime(_Symbol, PERIOD_CURRENT, 0);
    if(t != g_lastBarTime) { g_lastBarTime = t; return(true); }
+   return(false);
+}
+
+bool IsNewBarM5()   // bar M5 baru? (utk entry MTF sesi Overlap)
+{
+   datetime t = iTime(_Symbol, PERIOD_M5, 0);
+   if(t != g_lastBarTimeM5) { g_lastBarTimeM5 = t; return(true); }
    return(false);
 }
 
