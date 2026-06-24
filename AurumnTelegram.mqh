@@ -28,6 +28,7 @@ long g_tgOffset            = 0;
 bool g_tgPaused            = false;
 bool g_tgCloseAllRequested = false;
 bool g_tgStatusRequested   = false;
+bool g_tgResumeGuardRequested = false;   // /resume -> minta EA reset HealthGuard
 
 bool Telegram_IsPaused() { return(g_tgPaused); }
 
@@ -82,13 +83,15 @@ void Telegram_HandleCommand(string text)
    if(StringFind(low, "/pause") == 0)
    { g_tgPaused = true;  Telegram_Send("Trading DIJEDA. Posisi terbuka tetap dikelola."); }
    else if(StringFind(low, "/resume") == 0)
-   { g_tgPaused = false; Telegram_Send("Trading DILANJUTKAN."); }
+   { g_tgPaused = false; g_tgResumeGuardRequested = true; }   // unpause + reset guard (EA yg konfirmasi)
    else if(StringFind(low, "/closeall") == 0)
    { g_tgCloseAllRequested = true; }
    else if(StringFind(low, "/status") == 0)
    { g_tgStatusRequested = true; }
+   else if(StringFind(low, "/version") == 0)
+   { Telegram_Send("Aurumn EA v" + EA_VERSION); }
    else if(StringFind(low, "/help") == 0)
-   { Telegram_Send("Perintah Aurumn:\n/status - saldo & posisi\n/pause - jeda entry baru\n/resume - lanjut\n/closeall - tutup semua posisi\n/help - bantuan"); }
+   { Telegram_Send("Perintah Aurumn:\n/status - saldo, posisi, DD, sesi, HealthGuard\n/pause - jeda entry baru (posisi tetap dikelola)\n/resume - lanjut + reset HealthGuard\n/closeall - tutup SEMUA posisi sekarang\n/version - versi EA\n/help - daftar perintah"); }
 }
 
 //--- Ambil & proses update (offset agar tak dobel)

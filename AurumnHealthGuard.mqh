@@ -31,8 +31,60 @@ input bool   HG_PauseInTester       = false;   // Izinkan jeda di Strategy Teste
 
 //--- State
 double g_hgResults[];        // P/L bersih trade terakhir (rolling window)
-bool   g_hgTripped = false;  // sudah trip? (tetap true sampai restart EA)
+bool   g_hgTripped = false;  // sudah trip? (persist ke disk; restart TIDAK reset)
 string g_hgReason  = "";     // alasan trip
+
+//--- FIX#5: Persistensi state ke disk (LIVE saja; tester selalu fresh agar backtest bersih)
+string HG_StateFileName() { return("AurumnHG_" + _Symbol + ".dat"); }
+
+void HealthGuard_SaveState()
+{
+   if((bool)MQLInfoInteger(MQL_TESTER) || !UseHealthGuard) return;
+   int h = FileOpen(HG_StateFileName(), FILE_WRITE|FILE_BIN);
+   if(h == INVALID_HANDLE) return;
+   FileWriteInteger(h, g_hgTripped ? 1 : 0, INT_VALUE);
+   int n = ArraySize(g_hgResults);
+   FileWriteInteger(h, n, INT_VALUE);
+   for(int i = 0; i < n; i++) FileWriteDouble(h, g_hgResults[i]);
+   FileClose(h);
+}
+
+void HealthGuard_LoadState()
+{
+   if((bool)MQLInfoInteger(MQL_TESTER) || !UseHealthGuard) return;
+   if(!FileIsExist(HG_StateFileName())) return;
+   int h = FileOpen(HG_StateFileName(), FILE_READ|FILE_BIN);
+   if(h == INVALID_HANDLE) return;
+   g_hgTripped = (FileReadInteger(h, INT_VALUE) == 1);
+   int n = FileReadInteger(h, INT_VALUE);
+   ArrayResize(g_hgResults, 0);
+   for(int i = 0; i < n && !FileIsEnding(h); i++)
+   {
+      int sz = ArraySize(g_hgResults);
+      ArrayResize(g_hgResults, sz + 1);
+      g_hgResults[sz] = FileReadDouble(h);
+   }
+   FileClose(h);
+   if(g_hgTripped)
+   {
+      if(g_hgReason == "") g_hgReason = "(state TRIPPED dipulihkan dari disk)";
+      Print("HealthGuard: state TRIPPED dipulihkan - entry TETAP DIJEDA. Hapus MQL5/Files/", HG_StateFileName(), " utk reset stlh investigasi.");
+   }
+   else
+      Print("HealthGuard: riwayat ", ArraySize(g_hgResults), " trade dipulihkan dari disk.");
+}
+
+//--- Reset trip via perintah (Telegram /resume) - tindakan SENGAJA manusia
+void HealthGuard_Reset()
+{
+   bool was = g_hgTripped;
+   g_hgTripped = false;
+   g_hgReason  = "";
+   ArrayResize(g_hgResults, 0);                          // window bersih -> evaluasi ulang dari trade baru
+   if(!(bool)MQLInfoInteger(MQL_TESTER) && FileIsExist(HG_StateFileName()))
+      FileDelete(HG_StateFileName());                    // hapus state persisten
+   if(was) Print("HealthGuard: trip DI-RESET (perintah). Window dikosongkan + file state dihapus.");
+}
 
 bool   HealthGuard_IsTripped() { return(g_hgTripped); }
 string HealthGuard_Reason()    { return(g_hgReason); }
@@ -51,6 +103,7 @@ void HealthGuard_Init()
    ArrayResize(g_hgResults, 0);
    g_hgTripped = false;
    g_hgReason  = "";
+   HealthGuard_LoadState();   // FIX#5: pulihkan state live dari disk (tester di-skip)
 }
 
 //--- Evaluasi kesehatan dari window saat ini
@@ -100,6 +153,7 @@ void HealthGuard_RecordTrade(double netResult)
       ArrayResize(g_hgResults, HG_WindowTrades);
    }
    HealthGuard_Evaluate();
+   HealthGuard_SaveState();   // FIX#5: persist tiap trade -> restart tak hilang state
 }
 
 #endif // AURUMN_HEALTHGUARD_MQH

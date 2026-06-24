@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v2.1.6
+//  VERSION: v2.1.9
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -45,6 +45,17 @@
 //    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
 //             Europe (range Asia & window) via g_euDstShift. Audit lolos.
 //    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//    v2.1.9 - News DINAMIS: News_Source enum (AUTO/CSV_ONLY/CALENDAR_ONLY). AUTO =
+//             live pakai kalender MT5 dinamis (fallback CSV), tester pakai CSV otomatis.
+//             Refresh harian di live (News_MaybeRefresh di OnTick). Backtest tetap CSV
+//             reproducible. Ganti 2 toggle bool lama (News_UseCSV/UseCalendar).
+//    v2.1.8 - Telegram: /resume kini reset HealthGuard (unpause + hapus trip/state)
+//             via flag -> EA panggil HealthGuard_Reset(). Tambah /version (pakai EA_VERSION).
+//             /status diperkaya status HealthGuard. /help diperbarui.
+//    v2.1.7 - FIX#4: string versi OnInit pakai EA_VERSION (dulu hardcode v1.9.6,
+//             stale -> bingung debug live). Label sesi London kini dinamis ikut window.
+//             FIX#5: HealthGuard PERSIST state ke disk (live) - restart TIDAK lagi
+//             menghapus riwayat/trip. Tester tetap fresh. Reset = hapus file .dat.
 //    v2.1.6 - KONFIG LIVE London+Asia. TradeAsianSession ON. MaxDrawdown 100->50
 //             (rem darurat live). Asia DIKONFIRMASI 1.0/1.2 (report 1.5/1.5 = override tester).
 //             PERINGATAN: London+Asia di RR1.5+Asia1.0/1.2 belum pernah di-backtest bersama.
@@ -114,7 +125,8 @@
 //             AurumnHealthGuard.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "2.16"
+#property version   "2.19"
+#define      EA_VERSION   "2.1.9"   // SATU sumber versi; dipakai di log OnInit (jangan stale lagi)
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
@@ -331,7 +343,7 @@ int OnInit()
    //--- Inisialisasi strategi sesi Eropa (SESI 4)
    if(!Euro_Init())
    { Log(1, "Gagal inisialisasi strategi sesi Eropa."); return(INIT_FAILED); }
-   Log(2, "Strategi Eropa (London murni 10-15): " +
+   Log(2, "Strategi Eropa (London " + IntegerToString(EuropeanSessionStart) + "-" + IntegerToString(EuropeanSessionEnd) + "): " +
           (Euro_Mode == EURO_SWEEP ? "SWEEP (fade London Sweep)"
                                    : "BREAKOUT (tembus range Asia)") +
           " | range Asia jam " + IntegerToString(Euro_AsianStart) + "-" +
@@ -412,7 +424,7 @@ int OnInit()
       Log(1, "PERINGATAN: AutoTrading nonaktif.");
 
    //--- Ringkasan
-   Log(2, "===== AURUMN EA v1.9.6 INIT =====");
+   Log(2, "===== AURUMN EA v" + EA_VERSION + " INIT =====");
    Log(2, "Simbol     : " + _Symbol + " | Cent: " + (g_spec.isCent ? "YA" : "TIDAK") +
           " | Cur: " + g_spec.accCurrency);
    Log(2, "Pip        : " + DoubleToString(g_spec.pip, g_spec.digits) +
@@ -479,6 +491,7 @@ void OnTimer()
                     "\nPosisi: " + IntegerToString(CountOurPositions()) +
                     "\nDrawdown: " + DoubleToString(CurrentDrawdownPct(), 1) + "%" +
                     "\nSesi: " + ActiveSessionName() +
+                    "\nHealthGuard: " + (HealthGuard_IsTripped() ? ("TRIP - " + HealthGuard_Reason()) : "OK") +
                     "\nStatus: " + (Telegram_IsPaused() ? "DIJEDA" : "AKTIF"));
    }
    if(g_tgCloseAllRequested)
@@ -487,6 +500,15 @@ void OnTimer()
       int n = CountOurPositions();
       CloseOurPositions("telegram /closeall");
       Telegram_Send("/closeall - " + IntegerToString(n) + " posisi diperintahkan tutup.");
+   }
+   if(g_tgResumeGuardRequested)
+   {
+      g_tgResumeGuardRequested = false;
+      bool wasTripped = HealthGuard_IsTripped();
+      HealthGuard_Reset();
+      Telegram_Send("Trading DILANJUTKAN." +
+                    (wasTripped ? "\nHealthGuard di-RESET (trip dihapus, window dikosongkan, file state dihapus)."
+                                : "\nHealthGuard sudah normal (tak ada trip)."));
    }
 }
 
@@ -525,6 +547,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   //--- News: refresh harian sumber dinamis (live; tester di-skip otomatis)
+   News_MaybeRefresh();
+
    //--- State risk diperbarui tiap tick (lacak equity peak & halt)
    UpdateRiskState();
 

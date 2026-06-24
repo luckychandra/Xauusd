@@ -1,9 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                          AurumnNewsFilter.mqh     |
 //|        SESI 7: NEWS FILTER                                       |
-//|        Sumber data (2 mode, bisa dipakai bersama):              |
-//|        1) FILE CSV (utama) - jalan di Strategy Tester & live.    |
-//|        2) Kalender MT5 bawaan - LIVE saja (tak jalan di tester). |
+//|        Sumber data via News_Source (dinamis live + CSV backtest):|
+//|        AUTO - live=kalender MT5 dinamis, tester=CSV (rekomendasi)|
+//|        CSV_ONLY - paksa CSV (reproducible; backtest/no-calendar) |
+//|        CALENDAR_ONLY - paksa kalender MT5 (LIVE saja)            |
 //|                                                                  |
 //|        FORMAT CSV (taruh di folder MQL5/Files/):                |
 //|          YYYY.MM.DD,HH:MM,CCY[,IMPACT]                           |
@@ -15,22 +16,30 @@
 #ifndef AURUMN_NEWS_FILTER_MQH
 #define AURUMN_NEWS_FILTER_MQH
 
+//--- Sumber data news: dinamis (live) + CSV (backtest), keduanya berfungsi
+enum ENewsSource
+{
+   NEWS_AUTO          = 0,   // OTOMATIS: live=kalender MT5, tester=CSV (rekomendasi)
+   NEWS_CSV_ONLY      = 1,   // PAKSA CSV (reproducible; backtest atau jika kalender tak ada)
+   NEWS_CALENDAR_ONLY = 2    // PAKSA kalender MT5 (LIVE saja; di tester akan kosong)
+};
+
 input group "=== SESI 7: NEWS FILTER ==="
 input bool   EnableNewsFilter    = true;             // Aktifkan news filter
 input int    News_MinutesBefore  = 30;               // Pause sebelum news (menit)
 input int    News_MinutesAfter   = 30;               // Pause sesudah news (menit)
 input bool   News_ClosePositions = false;            // Tutup posisi saat masuk window news
-input bool   News_UseCSV         = true;             // Baca dari file CSV (tester & live)
+input ENewsSource News_Source    = NEWS_AUTO;         // SUMBER news (AUTO=live kalender + tester CSV)
 input string News_CSVFile        = "AurumnNews.csv"; // Nama file CSV
 input bool   News_CSVCommonFolder = true;            // File di folder Common (andal utk tester)
 input int    News_CSVOffsetHours = 0;                // Jam konversi waktu CSV -> server (0=sudah server)
-input bool   News_UseCalendar    = false;            // Kalender MT5 (LIVE saja)
 input bool   News_FilterUSD      = true;             // Blokir saat news USD
 input bool   News_FilterEUR      = false;            // Blokir saat news EUR juga
 
 //--- Penyimpanan event
 struct SNewsEvent { datetime time; string ccy; };
 SNewsEvent g_news[];
+datetime   g_newsLastRefresh = 0;   // waktu muat terakhir (refresh live harian)
 
 //--- Apakah currency event ini difilter?
 bool News_CcyIncluded(const string ccy)
@@ -116,14 +125,47 @@ void News_LoadCalendar()
    Print("[News] ", added, " event high-impact dimuat dari kalender MT5 (live).");
 }
 
+//--- Pilih & muat sumber aktif (dipakai Init + refresh)
+void News_LoadActive()
+{
+   ArrayResize(g_news, 0);
+   bool tester = (bool)MQLInfoInteger(MQL_TESTER);
+   if(News_Source == NEWS_CSV_ONLY)      { News_LoadCSV(); return; }
+   if(News_Source == NEWS_CALENDAR_ONLY) { News_LoadCalendar(); return; }
+   //--- NEWS_AUTO: live=kalender dinamis (fallback CSV bila kosong), tester=CSV
+   if(tester) News_LoadCSV();
+   else
+   {
+      News_LoadCalendar();
+      if(ArraySize(g_news) == 0)
+      {
+         Print("[News] Kalender live kosong -> fallback ke CSV.");
+         News_LoadCSV();
+      }
+   }
+}
+
 //--- Inisialisasi
 bool News_Init()
 {
    ArrayResize(g_news, 0);
+   g_newsLastRefresh = 0;
    if(!EnableNewsFilter) return(true);
-   if(News_UseCSV)      News_LoadCSV();
-   if(News_UseCalendar) News_LoadCalendar();
+   News_LoadActive();
+   g_newsLastRefresh = TimeCurrent();
+   Print("[News] sumber=", EnumToString(News_Source), " | ", ArraySize(g_news), " event aktif");
    return(true);
+}
+
+//--- Refresh berkala (LIVE saja, harian) agar event baru/berubah terbaca
+void News_MaybeRefresh()
+{
+   if(!EnableNewsFilter) return;
+   if((bool)MQLInfoInteger(MQL_TESTER)) return;             // tester: tak perlu refresh
+   if(TimeCurrent() - g_newsLastRefresh < 86400) return;    // sekali sehari
+   News_LoadActive();
+   g_newsLastRefresh = TimeCurrent();
+   Print("[News] refresh harian: ", ArraySize(g_news), " event aktif");
 }
 
 void News_Deinit() { ArrayFree(g_news); }
