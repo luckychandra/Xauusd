@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v2.3.0
+//  VERSION: v2.3.1
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -45,6 +45,9 @@
 //    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
 //             Europe (range Asia & window) via g_euDstShift. Audit lolos.
 //    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//    v2.3.1 - Mean-rev frekuensi: edge-zone jadi OPSIONAL (Asian_UseEdgeZone, default
+//             OFF; redundan dgn pierce BB) + BB deviation 2.0->1.5. Pertahankan filter
+//             trend-veto & kontraksi-vol (pemotong loser). Tujuan: sampel layak utk uji edge.
 //    v2.3.0 - KEMBANGKAN mean-rev Asia (mode STRAT_MEANREV): 4 filter struktural
 //             menyerang penyebab kegagalan terbukti (PF 0.74 lama). #1 veto fade
 //             LAWAN tren H1 (anti pisau-jatuh). #2 wajib bar-tolak band/wick + RSI
@@ -146,8 +149,8 @@
 //             AurumnHealthGuard.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "2.30"
-#define      EA_VERSION   "2.3.0"   // SATU sumber versi; dipakai di log OnInit (jangan stale lagi)
+#property version   "2.31"
+#define      EA_VERSION   "2.3.1"   // SATU sumber versi; dipakai di log OnInit (jangan stale lagi)
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
