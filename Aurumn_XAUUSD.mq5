@@ -3,7 +3,7 @@
 //|                 EA UTAMA - XAUUSD(c) M15 - HFM Cent Account        |
 //|                 Integrasi: Sesi 1 (Foundation) + Sesi 2 (Money Mgmt)|
 //+------------------------------------------------------------------+
-//  VERSION: v2.2.2
+//  VERSION: v2.3.0
 //    v1.0.0 - Sesi 1: Foundation, time mgmt HFM, trade engine, logging
 //    v1.1.0 - Sesi 2: Money management (auto-lot, DD protection,
 //             daily-loss limit, consecutive-loss guard, ATR sizing)
@@ -45,6 +45,12 @@
 //    v1.9.4 - Kompatibilitas sesi: shift DST kini konsisten ke logika internal
 //             Europe (range Asia & window) via g_euDstShift. Audit lolos.
 //    v1.9.5 - Isi gap pra-London: sesi PRA-LONDON (Frankfurt 08-10), Donchian
+//    v2.3.0 - KEMBANGKAN mean-rev Asia (mode STRAT_MEANREV): 4 filter struktural
+//             menyerang penyebab kegagalan terbukti (PF 0.74 lama). #1 veto fade
+//             LAWAN tren H1 (anti pisau-jatuh). #2 wajib bar-tolak band/wick + RSI
+//             longgar (bukan nge-fade momentum). #3 gate kontraksi volatilitas
+//             (ATR<rata2; hindari ekspansi/SL raksasa). #4 TP target BB-tengah (mean).
+//             Semua TOGGLEABLE (MR_*), default ON. WAJIB backtest ulang sblm percaya.
 //    v2.2.2 - HAPUS sesi Pra-London sepenuhnya (kode bersih; file .mqh kini yatim).
 //             Bug#2[HIGH]: g_posSessionIdx dipulihkan saat restart-dgn-posisi (infer
 //             dari sesi pembuka via POSITION_TIME) -> posisi London tak lagi salah
@@ -140,8 +146,8 @@
 //             AurumnHealthGuard.mqh di folder MQL5/Include/
 //+------------------------------------------------------------------+
 #property copyright "Aurumn EA"
-#property version   "2.22"
-#define      EA_VERSION   "2.2.2"   // SATU sumber versi; dipakai di log OnInit (jangan stale lagi)
+#property version   "2.30"
+#define      EA_VERSION   "2.3.0"   // SATU sumber versi; dipakai di log OnInit (jangan stale lagi)
 #property strict
 #property description "Aurumn XAUUSDc M15 - Foundation + Money Mgmt + Sesi Asia (HFM Cent)"
 
@@ -449,7 +455,7 @@ int OnInit()
           " | RiskBasis: " + DoubleToString(RiskPercentage, 2) + "%");
    Log(2, "ServerTime : GMT+" + IntegerToString(CurrentServerGMTOffset()) +
           (IsServerInDST() ? " (summer)" : " (winter)") +
-          " | Jam sesi TETAP (London 10:00, NY 15:00)");
+          " | Sesi server KONSTAN (London " + IntegerToString(EuropeanSessionStart) + "-" + IntegerToString(EuropeanSessionEnd) + ", entry<" + IntegerToString(Euro_EntryWindowEnd) + ")");
    Log(2, "Equity     : " + DoubleToString(eq, 2) + " " + g_spec.accCurrency);
    Log(2, "Proteksi   : SessionLoss " + (MaxSessionLoss > 0 ? DoubleToString(MaxSessionLoss, 1) + "%" : "OFF") +
           " (per-sesi) | DailyCap " + (MaxDailyLoss > 0 ? DoubleToString(MaxDailyLoss, 1) + "%" : "OFF") +
@@ -725,7 +731,7 @@ void OnTick()
 //| ============ MONEY MANAGEMENT (SESI 2) ============              |
 //+------------------------------------------------------------------+
 
-//--- Map nama sesi -> index (0=ASIA,1=EUROPE,2=US, -1=NONE)
+//--- Map nama sesi -> index (0=ASIA,1=EUROPE,2=US,3=OVERLAP, -1=NONE)
 int SessionIndex(string sess)
 {
    if(sess == "ASIA")    return(0);
