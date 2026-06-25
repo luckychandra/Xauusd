@@ -26,13 +26,14 @@ input double AsianBO_MinChannelATR    = 0.5;   // Tinggi channel min (x ATR) - h
 
 input group "--- Mean Reversion (BB + RSI) ---"
 input int    Asian_BBPeriod      = 20;     // Periode Bollinger Bands
-input double Asian_BBDeviation   = 2.0;    // Deviasi BB
+input double Asian_BBDeviation   = 1.5;    // Deviasi BB (v2.3.1: 2.0->1.5, lbh byk sentuhan)
 input int    Asian_RSIPeriod     = 14;     // Periode RSI
 input double Asian_RSIOversold   = 30.0;   // Ambang RSI oversold
 input double Asian_RSIOverbought = 70.0;   // Ambang RSI overbought
 input bool   Asian_RequireRSITurn = true;  // Wajib RSI berbalik arah
 input int    Asian_RangeLookback = 24;     // Bar untuk S/R range
-input double Asian_EdgeZone      = 0.33;   // Harga di 33% tepi range
+input double Asian_EdgeZone      = 0.33;   // Harga di 33% tepi range (bila edge-zone ON)
+input bool   Asian_UseEdgeZone   = false;  // (v2.3.1) Wajib di tepi range? OFF=lbh byk trade (pierce BB sdh=ekstrem)
 input double Asian_ADXMaxTrend   = 25.0;   // Trade hanya bila ADX < ini (ranging)
 
 input group "--- Mean Reversion v2: filter struktural (toggle utk uji) ---"
@@ -182,6 +183,10 @@ int Asian_SignalMeanRev(const SAurumnSpec &spec, double atrPips, double &slPips,
    if(range <= 0) return(0);
    double posInRange = (close1 - rangeLow) / range;
 
+   //--- (v2.3.1) edge-zone kini OPSIONAL (default OFF): pierce BB sudah = ekstrem
+   bool edgeBuyOK  = (!Asian_UseEdgeZone) || (posInRange <= Asian_EdgeZone);
+   bool edgeSellOK = (!Asian_UseEdgeZone) || (posInRange >= (1.0 - Asian_EdgeZone));
+
    bool rsiTurnUp   = (!Asian_RequireRSITurn) || (rsi[0] > rsi[1]);
    bool rsiTurnDown = (!Asian_RequireRSITurn) || (rsi[0] < rsi[1]);
 
@@ -190,13 +195,13 @@ int Asian_SignalMeanRev(const SAurumnSpec &spec, double atrPips, double &slPips,
    if(MR_RequireRejection)
    {
       double rsiHi = 100.0 - MR_RSI_Reject;
-      buy  = (low1  < bbLower) && (close1 > bbLower) && (rsi[0] < MR_RSI_Reject) && rsiTurnUp   && (posInRange <= Asian_EdgeZone);
-      sell = (high1 > bbUpper) && (close1 < bbUpper) && (rsi[0] > rsiHi)         && rsiTurnDown && (posInRange >= (1.0 - Asian_EdgeZone));
+      buy  = (low1  < bbLower) && (close1 > bbLower) && (rsi[0] < MR_RSI_Reject) && rsiTurnUp   && edgeBuyOK;
+      sell = (high1 > bbUpper) && (close1 < bbUpper) && (rsi[0] > rsiHi)         && rsiTurnDown && edgeSellOK;
    }
    else
    {
-      buy  = (close1 < bbLower) && (rsi[0] < Asian_RSIOversold)   && rsiTurnUp   && (posInRange <= Asian_EdgeZone);
-      sell = (close1 > bbUpper) && (rsi[0] > Asian_RSIOverbought) && rsiTurnDown && (posInRange >= (1.0 - Asian_EdgeZone));
+      buy  = (close1 < bbLower) && (rsi[0] < Asian_RSIOversold)   && rsiTurnUp   && edgeBuyOK;
+      sell = (close1 > bbUpper) && (rsi[0] > Asian_RSIOverbought) && rsiTurnDown && edgeSellOK;
    }
    if(!buy && !sell) return(0);
 
